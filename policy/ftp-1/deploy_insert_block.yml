@@ -7,7 +7,7 @@ eval_step_timeout_seconds: 10
 
 ftp_1:
   host: "127.0.0.1"
-  port: 8002
+  port: 8010
   api_key:
   prompt: "Insert the blue half cylinder into the matching hole in the yellow box."
   prompt_from_task_instruction: true

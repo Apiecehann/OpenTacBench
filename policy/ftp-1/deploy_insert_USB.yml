@@ -7,14 +7,14 @@ eval_step_timeout_seconds: 10
 
 ftp_1:
   host: "127.0.0.1"
-  port: 8002
+  port: 8014
   api_key:
   prompt: "Pick up the USB plug from the blue slot and insert it into the red USB slot."
   prompt_from_task_instruction: true
   action_schema: "absolute_qpos8"
   action_dim: 8
   execute_from_index: 1
-  open_loop_horizon: 1
+  open_loop_horizon: 10
   temporal_ensemble: true
   temporal_ensemble_horizon: 20
   temporal_ensemble_k: 0.01

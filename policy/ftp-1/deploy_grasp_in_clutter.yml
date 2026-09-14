@@ -7,7 +7,7 @@ eval_step_timeout_seconds: 10
 
 ftp_1:
   host: "127.0.0.1"
-  port: 8002
+  port: 8000
   api_key:
   prompt: "Grasp the blue half cylinder from the clutter and lift it up."
   ## Grasp the yellow cylinder from the clutter and lift it up.
@@ -15,7 +15,7 @@ ftp_1:
   action_schema: "absolute_qpos8"
   action_dim: 8
   execute_from_index: 1
-  open_loop_horizon: 1
+  open_loop_horizon: 5
   temporal_ensemble: true
   temporal_ensemble_horizon: 20
   temporal_ensemble_k: 0.01
