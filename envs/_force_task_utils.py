@@ -9,7 +9,6 @@ import numpy as np
 import os
 import pickle
 from pathlib import Path
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 
 # Tension strap geometry
@@ -22,6 +21,7 @@ def tetra_faces(tets):
     return faces[counts[inverse] == 1]
 
 def write_tet_asset(path, points, tets, faces, color=(.12, .45, .72)):
+    from pxr import Sdf, Usd, UsdGeom, Vt
     from pxr import Sdf, Usd, UsdGeom, Vt
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +205,7 @@ def replace_squeezed_chip(simulation, chip, fragments, standby_pose, previous_st
 # Chip scene
 
 def set_actor_visible(stage, actor, visible):
+    from pxr import UsdGeom
     for path in actor.cfg.visual_prim_paths:
         imageable = UsdGeom.Imageable(stage.GetPrimAtPath(path))
         if visible:
@@ -286,6 +287,7 @@ def read_rgb(task):
 # Force task scene
 
 def _material(stage, path, color, roughness=.5, metallic=0.):
+    from pxr import Gf, Sdf, UsdShade
     mat = UsdShade.Material.Define(stage, path)
     shader = UsdShade.Shader.Define(stage, path + '/Shader')
     shader.CreateIdAttr('UsdPreviewSurface')
@@ -365,7 +367,8 @@ def configure_final_task(cfg, parameters, *, max_policy_seconds):
     # separate audit sidecar because observed qpos is not the issued target.
     from pathlib import Path
     workspace=parameters.get("workspace")
-    cfg.public_action_trace_path=str(Path(workspace)/"public_actions_{seed}.jsonl") if workspace else None
+    cfg.public_action_trace_path = (str(Path(workspace)/"public_actions_{seed}.jsonl")
+                                    if workspace and parameters.get("record_public_actions", False) else None)
     cfg.absolute_joint_zero_velocity_targets = True
     live_state=parameters.get("live_action_joint_state",True)
     if not isinstance(live_state,bool):
@@ -441,7 +444,9 @@ def predict_calibrated(model,features):
         raise ValueError('RGB calibration feature contract mismatch')
     return float(x@weights+model['bias'])
 
-def task_parameters(*, require_nonnegative_seed=True):
+def task_parameters(cfg=None, *, require_nonnegative_seed=True):
+    if cfg is not None and hasattr(cfg, "force_task_parameters"):
+        return dict(cfg.force_task_parameters)
     path = os.environ.get('VITAFORGE_TASK_CONFIG')
     if not path:
         return {}
@@ -493,9 +498,11 @@ def configure_gel(tactiles, parameters):
 # Force task scene
 
 def _bind(prim, material):
+    from pxr import UsdShade
     UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
 
 def _cylinder(stage,path,center,radius,height,mat):
+    from pxr import Gf, UsdGeom
     mesh=UsdGeom.Cylinder.Define(stage,path)
     mesh.CreateRadiusAttr(radius)
     mesh.CreateHeightAttr(height)
@@ -504,6 +511,7 @@ def _cylinder(stage,path,center,radius,height,mat):
     _bind(mesh.GetPrim(),mat)
 
 def _rounded_box(stage, path, center, size, radius, mat):
+    from pxr import Gf, UsdGeom, Vt
     width, depth, height = size
     radius = min(radius, width*.45, depth*.45)
     bevel = min(height*.22, radius*.45, .0015)
@@ -535,6 +543,7 @@ def _rounded_box(stage, path, center, size, radius, mat):
 
 class ForceTaskScene:
     def __init__(self,task,kind):
+        from pxr import Sdf, Usd, UsdGeom, UsdShade
         self.task=task
         import omni.usd
         stage=omni.usd.get_context().get_stage()
@@ -580,6 +589,7 @@ class ForceTaskScene:
 
 
     def color_strap(self, mesh, rest_points=None):
+        from pxr import Vt
         task=self.task
         points=(np.asarray(mesh.GetPointsAttr().Get(),dtype=float)
                 if rest_points is None else np.asarray(rest_points))
@@ -806,3 +816,358 @@ def original_action_schedule(steps,joints,start,command_path,*,terminal_step=Non
         recorded_state_gap_calls=sum(row["source"]!="original_public_qpos" for row in result),
         uses_feedback_corrections=False)
 
+
+
+def take_force_task_action(task, action, *, action_type="qpos", force=True,
+                           joint_velocity=None, action_repeat=None):
+    """Execute a force-task decision without changing the legacy action path."""
+    import torch
+    if action_type != "qpos":
+        raise ValueError("Force tasks require absolute joint targets (qpos)")
+    repeat = task.cfg.policy_action_repeat if action_repeat is None else action_repeat
+    if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
+        raise ValueError("action_repeat must be a positive integer")
+    if task.take_action_cnt >= task.cfg.step_lim or task.eval_success:
+        return True, task.eval_success
+    target = torch.as_tensor(action, dtype=torch.float32, device=task.device).reshape(-1)
+    if target.shape != (8,) or not bool(torch.isfinite(target).all()):
+        raise ValueError("Force-task actions must contain eight finite joint targets")
+    task.take_action_cnt += 1
+    manager = task._robot_manager
+    if getattr(task.cfg, "live_action_joint_state", True):
+        initial = manager.robot.root_physx_view.get_dof_positions()[0, :8].clone()
+    else:
+        initial = manager.get_observations(["joint"])["joint"][:8].clone()
+    step, phase = task.step_count, task.phase_id
+    try:
+        for index in range(repeat):
+            command = initial + (target - initial) * ((index + 1) / repeat)
+            manager.set_arm(command[:-1], vel=joint_velocity, force=force)
+            manager.set_gripper(command[-1], force=force)
+            task._step()
+            if task.check_success():
+                task.eval_success = True
+            if task.eval_success or task.check_early_stop() or not task.plan_success:
+                break
+    finally:
+        if getattr(task.cfg, "public_action_trace_path", None):
+            append_public_action(task, target, initial, step, phase, repeat)
+    return True, task.eval_success
+
+
+def prepare_force_task_config(cfg, config, config_path, *, seed):
+    """Bind per-episode parameters to this config, never to process-global state."""
+    import copy
+    repo = Path(__file__).resolve().parents[1]
+    if isinstance(seed, bool) or int(seed) != seed or seed < 0:
+        raise ValueError("Force tasks require a nonnegative integer physics seed")
+    parameters = copy.deepcopy(config.get("task_parameters", {}))
+    parameters["physics_seed"] = int(seed)
+    # Work products belong to the selected output, not to the checked-in assets.
+    output = Path(cfg.save_dir)
+    if not output.is_absolute():
+        output = repo / output
+    cfg.save_dir = output.resolve()
+    parameters["workspace"] = str(cfg.save_dir / "work" / str(seed))
+    for name in ("calibration", "mesh_path", "glass_fragment_mesh_cache"):
+        if parameters.get(name):
+            path = Path(parameters[name])
+            if not path.is_absolute():
+                path = repo / path
+            path = path.resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"{name}: {path}")
+            parameters[name] = str(path)
+    if parameters.get("cache_actor_surfaces") or parameters.get("reuse_same_step_tactile_depth"):
+        raise ValueError("Surface/tactile caches are not enabled in this migration")
+    if config.get("sensor_type", "gsmini") != "gsmini":
+        raise ValueError("The four force-task configurations currently require gsmini")
+    # TacEx calls Task.seed during construction if cfg.seed is non-None.
+    # Task.seed needs scene objects; defer it until the explicit reset(seed).
+    cfg.seed = None
+    cfg.force_task_parameters = parameters
+    for key in ("skip_pre_move", "uniform_policy_recording", "firm_transport_press"):
+        if key in config:
+            setattr(cfg, key, bool(config[key]))
+    for key in ("max_save_frames", "reset_first_frame_steps", "reset_after_actor_steps",
+                "reset_final_steps", "reset_render_warmup_steps"):
+        if key in config:
+            setattr(cfg, key, int(config[key]))
+    if "chip_randomization_scale" in parameters and hasattr(cfg, "chip_randomization_scale"):
+        cfg.chip_randomization_scale = float(parameters["chip_randomization_scale"])
+    return parameters
+
+
+def force_task_openpi_repeat(deploy_config):
+    """Validate only the new task profile; legacy OpenPI settings stay untouched."""
+    if deploy_config.get("task_name") not in FINAL_TASKS:
+        return None
+    config = deploy_config.get("openpi", {})
+    if str(config.get("control_mode", "abs_joint")).lower() not in ("abs_joint", "relative_joint", "delta_joint"):
+        raise ValueError("The four force tasks require OpenPI joint control")
+    repeat = config.get("action_repeat", deploy_config.get("eval_action_repeat", ACTION_REPEAT))
+    for value in (repeat, deploy_config.get("eval_action_repeat", repeat)):
+        resolve_policy_action_repeat(deploy_config["task_name"], {"action_repeat": value})
+    return repeat
+
+
+def _force_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    temporary.replace(path)
+
+
+def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
+    """Run each physical seed in a fresh invocation of the existing entry point.
+
+    Only the four named tasks enter this path. A result file plus clean exit is
+    required; a crashed worker is never counted as a physical policy failure.
+    """
+    import fcntl
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+    import yaml
+    name = args.task if mode == "collect" else args.task_name
+    if name not in FINAL_TASKS or os.environ.get("OPENTACBENCH_FORCE_WORKER") == "1":
+        return None
+    repo = Path(__file__).resolve().parents[1]
+    def read_config(value, folder):
+        path = Path(value) if str(value).endswith((".yaml", ".yml")) else repo / folder / (value + ".yml")
+        return yaml.safe_load(path.read_text()), path
+    if config is None:
+        config, config_path = read_config(args.task_config, "task_config")
+    deploy = {}
+    if mode == "eval":
+        deploy, deploy_path = read_config(args.deploy_config, "policy")
+        if args.expert_check:
+            raise ValueError("Force tasks require a fresh scene per episode; collect expert episodes separately from policy evaluation")
+        if deploy.get("policy_name") == "openpi":
+            force_task_openpi_repeat({**deploy, "task_name": name})
+        if args.tactile_sensor not in (None, "gelsight", "gsmini"):
+            raise ValueError("The four task profiles require GSmini")
+    # Validate local paths and profile before launching Isaac or connecting to Pi05.
+    from types import SimpleNamespace
+    prepare_force_task_config(SimpleNamespace(save_dir=repo / "data"),
+                              config, config_path, seed=0)
+    first = args.start_seed
+    if first == -1:
+        first = config.get("start_seed", 0) if mode == "collect" else 1000000 * (1 + deploy.get("seed", 0))
+    goal = args.episode_num if mode == "collect" else args.total_num
+    if goal == -1:
+        goal = config.get("episode_num", 1)
+    last = args.max_seed
+    if last == -1:
+        last = config.get("max_seed", first + max(goal * 10, 99)) if mode == "collect" else first + goal - 1
+    if first < 0 or goal < 1 or last < first or goal > last - first + 1:
+        raise ValueError("Invalid or insufficient seed range for requested episode count")
+    if mode == "collect":
+        output = Path(config.get("save_dir_exact", Path(config.get("save_dir", "data")) / name / Path(config_path).stem))
+    else:
+        output = Path(config["eval_save_dir"]) if config.get("eval_save_dir") else (
+            repo / "eval_result" / deploy["policy_name"] / name / deploy_path.stem /
+            time.strftime("%Y-%m-%d_%H-%M-%S"))
+    if not output.is_absolute():
+        output = repo / output
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / ".force_task.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state_path = output / "force_task_progress.json"
+        options = vars(args).copy()
+        for key in ("start_seed", "max_seed", "episode_num", "total_num"):
+            options.pop(key, None)
+        digest = hashlib.sha256(json.dumps([config, deploy, options], sort_keys=True).encode())
+        # Resuming across edits must not silently combine different task semantics.
+        files = [repo / "envs" / (name + ".py"), Path(__file__).resolve(),
+                 repo / "envs/_base_task.py", repo / "envs/robot/robot.py",
+                 repo / "envs/utils/data.py", repo / "scripts" / ("collect_data.py" if mode == "collect" else "eval_policy.py")]
+        if deploy.get("policy_name") == "openpi":
+            files += list((repo / "policy/openpi").glob("*.py"))
+        calibration = config.get("task_parameters", {}).get("calibration")
+        if calibration:
+            files.append(repo / calibration)
+        for path in sorted(files):
+            digest.update(path.read_bytes())
+        signature = digest.hexdigest()
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            if state["signature"] != signature or state["first_seed"] != first:
+                raise ValueError("Output contains a different configuration/code/seed range; choose a new save_dir")
+            if any(row["result"] == "error" for row in state["attempts"].values()):
+                raise ValueError("Output contains an interrupted/error attempt; preserve it and choose a new save_dir")
+        else:
+            if any(path.name != ".force_task.lock" for path in output.iterdir()):
+                raise FileExistsError("Output has existing artifacts without force-task progress; choose a new save_dir")
+            state = dict(task=name, mode=mode, signature=signature, first_seed=first,
+                         next_seed=first, attempts={})
+        state.update(target=goal, max_seed=last, status="running")
+        _force_json(state_path, state)
+        def completed():
+            return sum(row["result"] == "success" if mode == "collect"
+                       else row["result"] in ("success", "fail") for row in state["attempts"].values())
+        for seed in range(state["next_seed"], last + 1):
+            if completed() >= goal:
+                break
+            attempt = output / "attempts" / str(seed)
+            if attempt.exists():
+                raise FileExistsError(f"Preserve the incomplete attempt: {attempt}")
+            attempt.mkdir(parents=True)
+            result_path = attempt / "result.json"
+            environment = os.environ.copy()
+            environment.update(OPENTACBENCH_FORCE_WORKER="1",
+                OPENTACBENCH_FORCE_OUTPUT=str(output), OPENTACBENCH_FORCE_RESULT=str(result_path),
+                PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", HEADLESS="1",
+                OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+                OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+            command = [sys.executable, "-u", "-B", str(repo / "scripts" / ("collect_data.py" if mode == "collect" else "eval_policy.py")),
+                       *sys.argv[1:], "--start_seed", str(seed), "--max_seed", str(seed),
+                       "--episode_num" if mode == "collect" else "--total_num", "1"]
+            timeout = float(config.get("max_episode_seconds", 2200)) + 900
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("Invalid worker wall-time limit")
+            print(f"{name}: {mode} seed {seed}, log {attempt / 'launch.log'}", flush=True)
+            with (attempt / "launch.log").open("w") as stream:
+                process = subprocess.Popen(command, cwd=repo, env=environment,
+                    stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                timed_out = False
+                try:
+                    returncode = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    returncode = 124
+                finally:
+                    # Includes timeout, Ctrl-C and descendants left by a crashed app.
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        if process.poll() is None:
+                            process.wait(timeout=10)
+                    except ProcessLookupError:
+                        pass
+                    except subprocess.TimeoutExpired:
+                        pass
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=10)
+            try:
+                row = json.loads(result_path.read_text()) if result_path.exists() else dict(result="error", error="worker result missing")
+                if not isinstance(row, dict):
+                    raise ValueError("worker result is not an object")
+            except (ValueError, OSError) as error:
+                row = dict(result="error", error=f"Invalid worker result: {error}")
+            if timed_out:
+                row = dict(result="error", seed=seed, error=f"Worker exceeded {timeout:.0f}s wall time")
+            if returncode or row.get("seed") != seed or row.get("result") not in ("success", "fail"):
+                row.update(result="error", returncode=returncode)
+            state["attempts"][str(seed)] = row
+            state["next_seed"] = seed + 1
+            if row["result"] == "error":
+                state["status"] = "error"
+            _force_json(state_path, state)
+            print(f"{name}: seed {seed}: {row['result']}; completed {completed()}/{goal}", flush=True)
+            if state["status"] == "error":
+                break
+        if state["status"] == "running":
+            state["status"] = "complete" if completed() >= goal else "seed_range_exhausted"
+        state["successes"] = sum(row["result"] == "success" for row in state["attempts"].values())
+        state["completed"] = completed()
+        _force_json(state_path, state)
+        print(json.dumps(dict(status=state["status"], successes=state["successes"],
+                              completed=completed(), output=str(output)), indent=2))
+        return 0 if state["status"] == "complete" else 1
+
+
+def launch_force_task_app(launcher_class, args):
+    """Match Vulkan's physical device to the single masked CUDA device."""
+    import os
+    import subprocess
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    if "," in visible or not visible:
+        raise ValueError("Select exactly one GPU for each force-task worker")
+    rows = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"], text=True)
+    matches = [int(row.split(",")[0]) for row in rows.splitlines()
+               if visible in (row.split(",")[0].strip(), row.split(",")[1].strip())]
+    if len(matches) != 1:
+        raise ValueError(f"Cannot resolve CUDA/Vulkan GPU mapping: {visible}")
+    class ForceTaskAppLauncher(launcher_class):
+        def _create_app(self):
+            self._sim_app_config.update(active_gpu=matches[0], physics_gpu=0, multi_gpu=False)
+            super()._create_app()
+    return ForceTaskAppLauncher(args)
+
+
+def run_force_task_episode(task, *, seed, policy=None, instructions=None,
+                           instruction_type="seen", step_timeout=0.0, max_actions=None):
+    """One episode, with explicit results and no reuse of damaged FEM state."""
+    import os
+    import time
+    import traceback
+    row = dict(seed=int(seed), result="error")
+    if max_actions is not None and (isinstance(max_actions, bool) or not isinstance(max_actions, int) or max_actions < 1):
+        raise ValueError("max_actions must be a positive integer")
+    limit = task.cfg.step_lim if max_actions is None else min(task.cfg.step_lim, max_actions)
+    if max_actions is not None:
+        row["smoke_test"] = True
+    try:
+        kwargs = {} if instructions is None else {"instructions": instructions[instruction_type]}
+        task.reset(seed=seed, **kwargs)
+        if max_actions is not None:
+            task.metadata["smoke_test"] = {"max_policy_actions": max_actions, "benchmark_score": False}
+        if policy is None:
+            task.play_once()
+        else:
+            policy.reset()
+            while (task.take_action_cnt < limit and task.plan_success
+                   and not task.eval_success and not task.check_early_stop()):
+                started = time.perf_counter()
+                policy.eval(task, task._get_observations())
+                elapsed = time.perf_counter() - started
+                if step_timeout > 0 and elapsed > step_timeout:
+                    raise TimeoutError(f"Policy step took {elapsed:.2f}s, limit {step_timeout:.2f}s")
+        if max_actions is not None and task.take_action_cnt >= limit:
+            row["stop_reason"] = "action_budget"
+            task.metadata["evaluation_stop_reason"] = "action_budget"
+        # Chip's physical scorer is finalized by save_to_hdf5 during collection.
+        # Policy evaluation has no HDF5 export, so persist its verdict here too.
+        observer = getattr(task, "_action_monitor", None)
+        if observer is not None and policy is not None:
+            observer.scorer.finish(getattr(task, "_execution_reason", "") or "incomplete")
+            task.metadata["success_diagnostics"] = observer.scorer.snapshot()
+            task.metadata["physical_result"] = task.metadata["success_diagnostics"]["outcome"]
+            task._set_phase(task.PHASE_TERMINAL,
+                            terminal_reason=task.metadata["success_diagnostics"]["terminal_reason"])
+        success = bool(task.plan_success and task.check_success() and not task.check_early_stop())
+        row["result"] = "success" if success else "fail"
+        row["terminal_reason"] = task.terminal_reason or ("success" if success else "incomplete")
+        if policy is None and success:
+            task.save_to_hdf5()
+        row["terminal_reason"] = task.terminal_reason or row["terminal_reason"]
+        task.metadata["terminal_reason"] = row["terminal_reason"]
+        task.clean_cache(result=row["result"])
+        if policy is None and success:
+            from scripts.validate_final_task_episode import validate_final
+            report = validate_final(task.save_path, expect="success")
+            row["validation"] = report
+            if not report["valid"]:
+                raise ValueError(f"Collected episode failed validation: {report['errors']}")
+        row.update(steps=int(task.step_count), actions=int(task.take_action_cnt))
+    except Exception:
+        row.update(result="error", error=traceback.format_exc())
+        try:
+            task.clean_cache(result="error")
+        except Exception:
+            row["cleanup_error"] = traceback.format_exc()
+    finally:
+        path = os.environ.get("OPENTACBENCH_FORCE_RESULT")
+        if path:
+            _force_json(path, row)
+    if row["result"] == "error":
+        raise RuntimeError(row["error"])
+    return dict(test_num=1, succ_num=int(row["result"] == "success"))

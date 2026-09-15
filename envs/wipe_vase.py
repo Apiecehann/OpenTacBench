@@ -320,7 +320,7 @@ ASSET=OBJECTS_ROOT/'task_assets/vase_wiping'
 
 class Task(BaseTask):
     def __init__(self,cfg,**kwargs):
-        self.params=task_parameters();self.work=Path(self.params['workspace'])
+        self.params=task_parameters(cfg);self.work=Path(self.params['workspace'])
         self.work.mkdir(parents=True,exist_ok=True)
         self.physics_seed=int(self.params.get('physics_seed',0))
         self.controller=self.params.get('controller','diagnostic_force')

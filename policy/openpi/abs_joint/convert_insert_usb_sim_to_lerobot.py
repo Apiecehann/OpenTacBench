@@ -66,7 +66,13 @@ import time
 
 import cv2
 import h5py
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+try:
+    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+except ModuleNotFoundError as exc:
+    if exc.name not in ("lerobot.common", "lerobot.common.datasets", "lerobot.common.datasets.lerobot_dataset"):
+        raise
+    # LeRobot 0.3.x retains dataset format v2.1 under its new module layout.
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -484,6 +490,47 @@ def build_features(image_shapes: dict[str, tuple[int, int, int]], control_mode: 
     return features
 
 
+def force_task_context(h5_file):
+    # Old datasets did not need this optional metadata to be valid JSON.
+    import json
+    try:
+        context = json.loads(h5_file.attrs.get("episode_context_json", "{}"))
+    except (ValueError, TypeError):
+        return None
+    if isinstance(context, dict) and context.get("task") in {
+            "grasp_fragile_chip", "bulb_tightening", "tension_strap", "wipe_vase"}:
+        return context
+    return None
+
+
+def episode_indices(h5_file, frame_stride, target_offset, drop_terminal_target_frame,
+                    control_mode, joint_gripper_index):
+    """Keep legacy sampling; force tasks learn only consecutive POLICY actions."""
+    context = force_task_context(h5_file)
+    if context is None:
+        return selected_indices(len(h5_file["step"]), frame_stride, target_offset,
+                                drop_terminal_target_frame)
+    if (control_mode, joint_gripper_index, frame_stride, target_offset) != ("abs_joint", 7, 1, 1):
+        raise ValueError("Force-task conversion requires abs_joint, gripper index 7, frame stride 1, target offset 1")
+    timing = context.get("timing_contract", {})
+    if not np.isclose(timing.get("policy_observation_dt_s", -1), 1 / 60):
+        raise ValueError("Force-task HDF5 must declare 60 Hz observations")
+    phase = np.asarray(h5_file["phase/id"]).reshape(-1)
+    steps = np.asarray(h5_file["step"]).reshape(-1)
+    terminal = np.flatnonzero(phase == 2)
+    policy = np.flatnonzero(phase == 1)
+    if (not len(terminal) or str(h5_file["phase"].attrs.get("terminal_reason", "")) != "success"
+            or len(policy) < 2 or not np.all(np.diff(steps[policy]) == 2)):
+        raise ValueError("Force-task training requires a successful episode with a uniform POLICY clock")
+    # The first terminal state can be the final action target. Presentation
+    # motions after that state must never become training observations/actions.
+    indices = policy[(policy + 1 < len(steps)) & (policy < terminal[0])]
+    indices = indices[(indices + 1 <= terminal[0]) & (steps[indices + 1] - steps[indices] == 2)]
+    if len(indices) < 2:
+        raise ValueError("Force-task episode has fewer than two valid 60 Hz state/action pairs")
+    return indices
+
+
 def make_states_for_mode(h5_file: h5py.File, control_mode: str, joint_gripper_index: int) -> np.ndarray:
     joint = h5_file["embodiment/joint"][()]
     if control_mode == "abs_eef":
@@ -507,9 +554,12 @@ def convert_episode(
     read_retry_delay: float,
     bad_image_policy: str,
 ) -> int:
+    import inspect
+    separate_task_argument = "task" in inspect.signature(dataset.add_frame).parameters
     with h5py.File(hdf5_path, "r") as h5_file:
         num_frames = validate_hdf5_episode(h5_file, hdf5_path, control_mode)
-        indices = selected_indices(num_frames, frame_stride, target_offset, drop_terminal_target_frame)
+        indices = episode_indices(h5_file, frame_stride, target_offset, drop_terminal_target_frame,
+                                  control_mode, joint_gripper_index)
 
         state_all = make_states_for_mode(h5_file, control_mode, joint_gripper_index)
         states = state_all[indices]
@@ -555,7 +605,11 @@ def convert_episode(
 
                 frame[feature_name] = image
                 last_images[feature_name] = image
-            dataset.add_frame(frame)
+            if separate_task_argument:
+                frame.pop("task")
+                dataset.add_frame(frame, task=task_prompt)
+            else:
+                dataset.add_frame(frame)
 
         if bad_image_count:
             print(f"Warning: replaced {bad_image_count} bad image frame(s) in {hdf5_path}")
@@ -579,12 +633,14 @@ def main() -> None:
         episodes = episodes[: args.max_episodes]
 
     first_episode = inspect_episode(episodes[0], image_size, args.control_mode)
-    indices = selected_indices(
-        first_episode["num_frames"],
-        args.frame_stride,
-        args.target_offset,
-        args.drop_terminal_target_frame,
-    )
+    with h5py.File(episodes[0], "r") as first_h5:
+        indices = episode_indices(first_h5, args.frame_stride, args.target_offset,
+                                  args.drop_terminal_target_frame, args.control_mode,
+                                  args.joint_gripper_index)
+        if force_task_context(first_h5) is not None:
+            if args.fps not in (None, 60):
+                raise ValueError("Force-task datasets require --fps 60")
+            args.fps = 60
     fps = args.fps or infer_fps(first_episode["step"], args.frame_stride, DEFAULT_FPS)
     features = build_features(first_episode["image_shapes"], args.control_mode)
 

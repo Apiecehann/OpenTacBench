@@ -182,6 +182,8 @@ class BaseTaskCfg(DirectRLEnvCfg):
     # Video Save Config.
     save_pre_move = False
     skip_pre_move = False
+    uniform_policy_recording = False
+    final_acceptance_contract = False
     tactile_video_key = "rgb_marker"
 
     # Resolved from SENSOR_RUNTIME_DEFAULTS after selecting the tactile sensor.
@@ -466,6 +468,9 @@ class BaseTask(UipcRLEnv):
  
         self.instruction = ""
         self.video_handler = VideoHandler()
+        if getattr(self.cfg, "final_acceptance_contract", False) and self.cfg.video_frequency > 0:
+            self.video_handler.fps = 1.0 / (
+                self.cfg.sim.dt * self.cfg.decimation * self.cfg.video_frequency)
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self._robot_manager.setup()
@@ -580,11 +585,15 @@ class BaseTask(UipcRLEnv):
 
     def get_episode_context(self) -> dict[str, Any]:
         """Return optional task context without forcing text into every observation."""
-        return {
+        context = {
             'instruction': self.instruction,
             'task': Path(sys.modules[self.__class__.__module__].__file__).stem,
             'seed': int(self.cfg.seed),
         }
+        if getattr(self.cfg, "final_acceptance_contract", False):
+            from ._force_task_utils import timing_context
+            context['timing_contract'] = timing_context(self)
+        return context
 
     def _set_phase(self, phase_id: int, terminal_reason: str | None = None):
         if phase_id not in self.PHASE_NAMES:
@@ -774,7 +783,10 @@ class BaseTask(UipcRLEnv):
             and self.phase_saved_counts[self.PHASE_PRE_MOVE] == 0
         ):
             self._update_render()
-            self.save_observations(self._get_observations())
+            boundary_observation = self._get_observations()
+            self.save_observations(boundary_observation)
+            if getattr(self.cfg, "final_acceptance_contract", False) and self.cfg.video_frequency > 0:
+                self.video_handler.write(self.get_frame_shot(boundary_observation))
 
         # update render to avoid artifacts
         for _ in range(5):
@@ -787,6 +799,9 @@ class BaseTask(UipcRLEnv):
 
         # The policy boundary starts only after all scripted preparation and
         # evaluation warm-up steps have completed.
+        if getattr(self.cfg, "final_acceptance_contract", False):
+            for _ in range((-self.step_count) % self.cfg.policy_action_repeat):
+                self._step(is_save=False)
         self._set_phase(self.PHASE_POLICY)
         self.policy_start_step = int(self.step_count)
         self.policy_step_count = 0
@@ -1141,7 +1156,11 @@ class BaseTask(UipcRLEnv):
  
     def save_to_hdf5(self):
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
-        HDF5Handler().pkls_to_hdf5(self.tmp_save_dir, self.save_path)
+        if getattr(self.cfg, "final_acceptance_contract", False):
+            handler = HDF5Handler(allow_empty_strings=True)
+        else:
+            handler = HDF5Handler()
+        handler.pkls_to_hdf5(self.tmp_save_dir, self.save_path)
         with h5py.File(self.save_path, 'a') as hdf5_file:
             phase_group = hdf5_file.require_group('phase')
             phase_group.attrs['schema_version'] = 2
@@ -1552,6 +1571,8 @@ class BaseTask(UipcRLEnv):
             self.delay(steps, is_save=is_save)
  
     def delay(self, steps=20, is_save:bool=False, force:bool=False):
+        if getattr(self.cfg, "final_acceptance_contract", False) and self.mode == "collect" and self.phase_id == self.PHASE_POLICY:
+            is_save = True
         if not force and not self.plan_success:
             return False
         self.logger.info(f"Delaying for {steps} steps")
@@ -1630,13 +1651,15 @@ class BaseTask(UipcRLEnv):
         action,
         action_type: Literal['qpos', 'ee', 'delta_ee'] = 'qpos',
         force: bool = True,
-        action_repeat: int = 1,
+        action_repeat: int | None = None,
         joint_velocity=None,
     ):
         if self.phase_id == self.PHASE_TERMINAL:
             raise RuntimeError('env_step() called after the episode reached TERMINAL')
         if self.phase_id != self.PHASE_POLICY:
             raise RuntimeError('env_step() is only valid after the POLICY handoff')
+        if action_repeat is None:
+            action_repeat = self.cfg.policy_action_repeat if getattr(self.cfg, "final_acceptance_contract", False) else 1
         if action_repeat < 1:
             raise ValueError('action_repeat must be at least 1')
         if joint_velocity is not None:
@@ -1645,33 +1668,38 @@ class BaseTask(UipcRLEnv):
             )
         previous_metrics = self.get_rl_metrics()
         action_tensor = torch.as_tensor(action, dtype=torch.float32, device=self.device)
-        first_action = action_tensor
-        initial_qpos = None
-        if action_type == 'qpos' and action_repeat > 1:
-            initial_qpos = self._robot_manager.get_observations(['joint'])['joint'][:len(action_tensor)]
-            first_action = initial_qpos + (action_tensor - initial_qpos) / action_repeat
-        exec_success, success = self.take_action(
-            first_action,
-            action_type=action_type,
-            force=force,
-            joint_velocity=joint_velocity,
-        )
-        for repeat_index in range(1, action_repeat):
-            if not exec_success or success or action_type != 'qpos':
-                break
-            interpolation = (repeat_index + 1) / action_repeat
-            repeated_action = initial_qpos + (action_tensor - initial_qpos) * interpolation
-            self._robot_manager.set_arm(
-                repeated_action[:-1],
-                vel=joint_velocity,
+        if getattr(self.cfg, "final_acceptance_contract", False):
+            exec_success, success = self.take_action(
+                action_tensor, action_type=action_type, force=force,
+                joint_velocity=joint_velocity, action_repeat=action_repeat)
+        else:
+            first_action = action_tensor
+            initial_qpos = None
+            if action_type == 'qpos' and action_repeat > 1:
+                initial_qpos = self._robot_manager.get_observations(['joint'])['joint'][:len(action_tensor)]
+                first_action = initial_qpos + (action_tensor - initial_qpos) / action_repeat
+            exec_success, success = self.take_action(
+                first_action,
+                action_type=action_type,
                 force=force,
+                joint_velocity=joint_velocity,
             )
-            self._robot_manager.set_gripper(repeated_action[-1], force=force)
-            self._step()
-            if self.check_success():
-                self.eval_success = True
-                success = True
-                break
+            for repeat_index in range(1, action_repeat):
+                if not exec_success or success or action_type != 'qpos':
+                    break
+                interpolation = (repeat_index + 1) / action_repeat
+                repeated_action = initial_qpos + (action_tensor - initial_qpos) * interpolation
+                self._robot_manager.set_arm(
+                    repeated_action[:-1],
+                    vel=joint_velocity,
+                    force=force,
+                )
+                self._robot_manager.set_gripper(repeated_action[-1], force=force)
+                self._step()
+                if self.check_success():
+                    self.eval_success = True
+                    success = True
+                    break
         current_metrics = self.get_rl_metrics()
         reward = self.compute_rl_reward(
             previous_metrics,
@@ -1689,18 +1717,19 @@ class BaseTask(UipcRLEnv):
             or task_early_stop
         )
         self.policy_step_count += 1
-        if terminated:
-            self._set_phase(self.PHASE_TERMINAL, terminal_reason='success')
-        elif truncated:
-            if not exec_success:
-                terminal_reason = 'execution_failure'
-            elif self.take_action_cnt >= self.cfg.step_lim:
-                terminal_reason = 'step_limit'
-            elif rl_early_stop:
-                terminal_reason = 'rl_early_stop'
-            else:
-                terminal_reason = 'task_early_stop'
-            self._set_phase(self.PHASE_TERMINAL, terminal_reason=terminal_reason)
+        if not (getattr(self.cfg, "final_acceptance_contract", False) and self.phase_id == self.PHASE_TERMINAL):
+            if terminated:
+                self._set_phase(self.PHASE_TERMINAL, terminal_reason='success')
+            elif truncated:
+                if not exec_success:
+                    terminal_reason = 'execution_failure'
+                elif self.take_action_cnt >= self.cfg.step_lim:
+                    terminal_reason = 'step_limit'
+                elif rl_early_stop:
+                    terminal_reason = 'rl_early_stop'
+                else:
+                    terminal_reason = 'task_early_stop'
+                self._set_phase(self.PHASE_TERMINAL, terminal_reason=terminal_reason)
         observation = self._get_observations()
         info = {
             'exec_success': bool(exec_success),
@@ -1719,6 +1748,7 @@ class BaseTask(UipcRLEnv):
         action_type: Literal['qpos', 'ee', 'delta_ee', 'delta_ee_rotvec', 'delta_ee_rotvec_ik'] = 'qpos',
         force: bool = True,
         joint_velocity=None,
+        action_repeat: int | None = None,
     ):
         '''
             qpos     : actions is Tensor([8]), qpos (7 DOFS + gripper)
@@ -1727,6 +1757,13 @@ class BaseTask(UipcRLEnv):
             delta_ee_rotvec : actions is Tensor([7]), delta_position (3), delta_rotvec (3), delta_gripper (1)
             delta_ee_rotvec_ik : actions is Tensor([7]), Differential IK single-step servo, no planner
         '''
+        if getattr(self.cfg, "final_acceptance_contract", False):
+            from ._force_task_utils import take_force_task_action
+            return take_force_task_action(
+                self, action, action_type=action_type, force=force,
+                joint_velocity=joint_velocity, action_repeat=action_repeat)
+        if action_repeat not in (None, 1):
+            raise ValueError("Use env_step(action_repeat=...) for legacy task repetition")
         if self.take_action_cnt >= self.cfg.step_lim or self.eval_success:
             return True, self.eval_success
 

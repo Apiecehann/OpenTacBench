@@ -11,6 +11,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class HDF5Handler:
+    def __init__(self, *, allow_empty_strings=False):
+        self.allow_empty_strings = allow_empty_strings
+
     @staticmethod
     def _image_to_uint8(img: np.ndarray) -> np.ndarray:
         img = np.asarray(img)
@@ -257,6 +260,8 @@ class HDF5Handler:
                     node.create_dataset(k, data=encode_data, dtype=f"S{max_len}")
                 elif len(v) > 0 and isinstance(v[0], str):
                     max_len = np.max([len(s) for s in v])
+                    if self.allow_empty_strings:
+                        max_len = max(1, int(max_len))
                     node.create_dataset(k, data=v, dtype=f'S{max_len}')
                 else:
                     v = np.array(v)
@@ -272,6 +277,7 @@ class HDF5Handler:
 class VideoHandler:
     def __init__(self):
         self.ffmpeg = None
+        self.fps = 10.0
 
     @staticmethod
     def _available_encoders() -> set[str]:
@@ -300,6 +306,8 @@ class VideoHandler:
         raise RuntimeError("ffmpeg does not provide a supported MP4 video encoder")
         
     def reset(self, video_path, video_size):
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise ValueError("video frame rate must be positive and finite")
         if self.ffmpeg is not None:
             self.close()
 
@@ -310,7 +318,7 @@ class VideoHandler:
         self.ffmpeg = subprocess.Popen([
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "rawvideo", "-pixel_format", "rgb24",
-            "-video_size", f"{w}x{h}", "-framerate", "10",
+            "-video_size", f"{w}x{h}", "-framerate", str(self.fps),
             "-i", "-", "-pix_fmt", "yuv420p",
             *self._encoder_args(),
             "-movflags", "+faststart",

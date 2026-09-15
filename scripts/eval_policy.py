@@ -191,6 +191,10 @@ parser.add_argument(
     choices=("random", "coke", "fanta", "7up", "pepsi"),
     help="Override env_cfg.empty_can when the selected task supports it.",
 )
+parser.add_argument(
+    "--max_policy_actions", type=int, default=None,
+    help="Four-task chain smoke test: cap policy decisions; not a benchmark score.",
+)
 AppLauncher.add_app_launcher_args(parser)
 
 ENV_CFG_OVERRIDE_KEYS = (
@@ -315,7 +319,19 @@ elif args_cli.livestream is None or args_cli.livestream < 0:
 args_cli.num_envs = 1
 
 # launch omniverse app, must done before importing anything from omni.isaac
-app_launcher = AppLauncher(args_cli)
+is_force_task = args_cli.task_name in ("grasp_fragile_chip", "bulb_tightening", "tension_strap", "wipe_vase")
+if args_cli.max_policy_actions is not None:
+    if not is_force_task or args_cli.max_policy_actions < 1:
+        raise ValueError("--max_policy_actions requires a four-task profile and a positive action budget")
+if is_force_task:
+    from envs._force_task_utils import (
+        dispatch_force_task_seeds, launch_force_task_app,
+        prepare_force_task_config, run_force_task_episode,
+    )
+    exit_code = dispatch_force_task_seeds("eval", args_cli)
+    if exit_code is not None:
+        raise SystemExit(exit_code)
+app_launcher = launch_force_task_app(AppLauncher, args_cli) if is_force_task else AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import traceback
@@ -381,6 +397,14 @@ def eval_policy(
     task: 'BaseTask', policy: 'BasePolicy', expert_check,
     start_seed, max_seed, test_total_num, instructions, instruciton_type:Literal['seen', 'unseen']='seen'
 ):
+    if is_force_task:
+        timeout = args_cli.eval_step_timeout_seconds
+        if timeout is None:
+            timeout = float(getattr(task.cfg, "eval_step_timeout_seconds", 0.0) or 0.0)
+        return run_force_task_episode(
+            task, seed=start_seed, policy=policy, instructions=instructions,
+            instruction_type=instruciton_type, step_timeout=timeout,
+            max_actions=args_cli.max_policy_actions)
     test_num, succ_num, seed = 0, 0, start_seed
 
     seed_path = task.save_root.parent / 'seeds.json'
@@ -720,6 +744,10 @@ def main():
     env_cfg.sim.device = args_cli.device if args_cli.device is not None \
         else env_cfg.sim.device
     seed = deploy_config.get("seed", 0)
+    if is_force_task:
+        env_cfg.save_dir = Path(os.environ["OPENTACBENCH_FORCE_OUTPUT"])
+        prepare_force_task_config(env_cfg, task_config, task_config_file,
+                                  seed=args_cli.start_seed)
 
     init_start = time.perf_counter()
     policy:BasePolicy = policy_module.Policy(deploy_config)
@@ -738,6 +766,26 @@ def main():
     log(f"Eval Config: {json.dumps(deploy_config, ensure_ascii=False, indent=4)}\n{'-' * 20}\n") 
     log(f"Task init finish in {task_init_cost:.2f} seconds.")
     log(f"Policy init finish in {policy_init_cost:.2f} seconds.")
+
+    if is_force_task:
+        if args_cli.max_policy_actions is not None:
+            log(f"Chain smoke test: at most {args_cli.max_policy_actions} actions; this is not a benchmark score.")
+        try:
+            results = eval_policy(
+                task=task, policy=policy,
+                expert_check=args_cli.expert_check,
+                start_seed=1000000 * (1 + seed) if args_cli.start_seed == -1 else args_cli.start_seed,
+                max_seed=args_cli.max_seed,
+                test_total_num=args_cli.total_num,
+                instructions=instructions,
+                instruciton_type=deploy_config.get("instruction_type", "seen")
+            )
+            log(f"Final Result: {results['succ_num']}/{results['test_num']} success.")
+        finally:
+            task.close()
+            policy.close()
+            simulation_app.close()
+        return
 
     results = eval_policy(
         task=task, policy=policy,

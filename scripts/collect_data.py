@@ -205,8 +205,19 @@ task_config, task_config_file = get_config(
 if task_config.get('render_frequency', 1) == 0:
     args_cli.livestream = 2
 
+is_force_task = args_cli.task in ("grasp_fragile_chip", "bulb_tightening", "tension_strap", "wipe_vase")
+if is_force_task:
+    from envs._force_task_utils import (
+        dispatch_force_task_seeds, launch_force_task_app,
+        prepare_force_task_config, run_force_task_episode,
+    )
+    exit_code = dispatch_force_task_seeds(
+        "collect", args_cli, config=task_config, config_path=task_config_file)
+    if exit_code is not None:
+        raise SystemExit(exit_code)
+
 # launch omniverse app, must done before importing anything from omni.isaac
-app_launcher = AppLauncher(args_cli)
+app_launcher = launch_force_task_app(AppLauncher, args_cli) if is_force_task else AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import importlib
@@ -224,6 +235,13 @@ def log(msg):
     print(msg)
 
 def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
+    if is_force_task:
+        try:
+            return run_force_task_episode(task, seed=start_seed)
+        finally:
+            task.close()
+            simulation_app.close()
+
     suc_num, seed = 0, 0
     suc_map = []
     
@@ -470,6 +488,9 @@ def main():
             setattr(env_cfg, key, value_type(task_config[key]))
     env_cfg.scene.num_envs = 1
     
+    if is_force_task:
+        env_cfg.save_dir = Path(os.environ["OPENTACBENCH_FORCE_OUTPUT"])
+        prepare_force_task_config(env_cfg, task_config, task_config_file, seed=start_seed)
     init_start = time.perf_counter()
     task:'BaseTask' = task_module.Task(env_cfg, mode='collect')
     init_cost = time.perf_counter() - init_start

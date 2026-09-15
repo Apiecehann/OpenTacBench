@@ -1310,7 +1310,7 @@ def box_mesh(width, depth, height, counts=(5,5,5)):
 
 class Task(LegacyBulbTask):
     def __init__(self,cfg,**kwargs):
-        self.params=task_parameters()
+        self.params=task_parameters(cfg)
         self.params.setdefault('public_tactile_grasp',True)
         self.params.setdefault('torque_tolerance_Nm',.012)
         for key,value in sample_physics('bulb_tightening',self.params.get('physics_seed',0)).items():

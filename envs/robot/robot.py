@@ -328,6 +328,8 @@ class RobotManager:
 
     def set_arm(self, pos:torch.Tensor, vel:torch.Tensor=None, env_ids:slice=None, force:bool=True):
         '''设置目标位姿'''
+        if force and getattr(self.task.cfg, "absolute_joint_zero_velocity_targets", False):
+            vel = torch.zeros_like(pos)
         self.robot.set_joint_position_target(pos, joint_ids=self._arm_ids, env_ids=env_ids)
         if vel is not None:
             self.robot.set_joint_velocity_target(vel, joint_ids=self._arm_ids, env_ids=env_ids)
@@ -364,6 +366,8 @@ class RobotManager:
     def set_gripper(self, pos:torch.Tensor, vel:torch.Tensor=None, env_ids:slice=None, force:bool=True):
         '''Set gripper target pose.'''
         pos = self._map_gripper_command(pos)
+        if force and getattr(self.task.cfg, "absolute_joint_zero_velocity_targets", False):
+            vel = torch.zeros_like(pos)
         self.robot.set_joint_position_target(pos, joint_ids=self._gripper_ids, env_ids=env_ids)
         if vel is not None:
             vel = self._map_gripper_command(vel)

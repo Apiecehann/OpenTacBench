@@ -463,7 +463,7 @@ def strap_mesh():
 
 class Task(BaseTask):
     def __init__(self, cfg, **kwargs):
-        self.params = task_parameters()
+        self.params = task_parameters(cfg)
         self.params.setdefault('public_tactile_grasp',True)
         self.params.setdefault('controller_deadband_N',.02)
         if self.params.get('mesh_path'):

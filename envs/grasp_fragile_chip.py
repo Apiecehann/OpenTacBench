@@ -1572,7 +1572,7 @@ class Task(BaseTask):
         render_mode=None,
         **kwargs,
     ):
-        self.chip_randomization_scale = float(task_parameters(require_nonnegative_seed=False).get("chip_randomization_scale", cfg.chip_randomization_scale))
+        self.chip_randomization_scale = float(task_parameters(cfg, require_nonnegative_seed=False).get("chip_randomization_scale", cfg.chip_randomization_scale))
         if not np.isfinite(self.chip_randomization_scale) or not 1.0 <= self.chip_randomization_scale <= 1.3:
             raise ValueError("Chip randomization scale must be finite and in [1.0, 1.3]")
         # User-selected support model: one global plane at the visible tabletop.
@@ -1589,7 +1589,7 @@ class Task(BaseTask):
         # line-search-robust solve traverse (~3 s/step); the settle completes
         # across the 35 reset steps and steady-state converges at Newton iter 3-5
         # (verified: seed 0 success in 152 s, converges at iter 0-5 by mid-episode).
-        solver_parameters = task_parameters(require_nonnegative_seed=False)
+        solver_parameters = task_parameters(cfg, require_nonnegative_seed=False)
         edge_guard=solver_parameters.get('chip_edge_contact_guard',cfg.chip_edge_contact_guard)
         if not isinstance(edge_guard,bool):
             raise ValueError('chip_edge_contact_guard must be a boolean task parameter')
@@ -1645,7 +1645,7 @@ class Task(BaseTask):
         self.tray_target_z_offset = TRAY_TARGET_Z_OFFSET_M
         self.placement_contact_trace = []
         from ._force_task_utils import configure_final_task
-        configure_final_task(cfg, task_parameters(require_nonnegative_seed=False), max_policy_seconds=60)
+        configure_final_task(cfg, task_parameters(cfg, require_nonnegative_seed=False), max_policy_seconds=60)
         super().__init__(cfg, mode, render_mode, **kwargs)
         self._chip_rest_geometry = ChipRestGeometry(
             self.uipc_sim, list(self._actor_manager.actors.values())
@@ -1655,8 +1655,8 @@ class Task(BaseTask):
         super().seed(seed)
         self.episode = sample_final_chip_episode(
             self.rng, geometry_range_scale=self.chip_randomization_scale,
-            family=task_parameters(require_nonnegative_seed=False).get("chip_shape_family"),
-            curvature_origin=task_parameters(require_nonnegative_seed=False).get("chip_curvature_origin","area_centroid"))
+            family=task_parameters(self.cfg, require_nonnegative_seed=False).get("chip_shape_family"),
+            curvature_origin=task_parameters(self.cfg, require_nonnegative_seed=False).get("chip_curvature_origin","area_centroid"))
         self.monitor_chip_contact = False
         self._chip_damage_armed = False
         self._fragment_release_pending = False
@@ -3190,7 +3190,7 @@ class Task(BaseTask):
             observer = getattr(self, '_action_monitor', None)
             if observer is not None:
                 observer.scorer.finish(reason)
-        return super().save_privileged_sidecar(reason=reason)
+        return None  # Physical failure is recorded by the collector; no extra sidecar.
 
     def save_to_hdf5(self):
         from ._force_task_utils import record_terminal_observation

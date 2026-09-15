@@ -75,6 +75,11 @@ class Policy(BasePolicy):
                 f"实际 state_dim={self.state_dim}, action_dim={self.action_dim}"
             )
 
+        self.force_task_action_repeat = None
+        if deploy_config.get("task_name") in ("grasp_fragile_chip", "bulb_tightening", "tension_strap", "wipe_vase"):
+            from envs._force_task_utils import force_task_openpi_repeat
+            self.force_task_action_repeat = force_task_openpi_repeat(deploy_config)
+
         api_key = openpi_cfg.get("api_key")
         if api_key == "":
             api_key = None
@@ -203,10 +208,16 @@ class Policy(BasePolicy):
 
         if self.control_mode in ("abs_joint", "relative_joint"):
             torch_action = sanitize_abs_joint_action(action, task)
-            result = task.take_action(
-                torch_action,
-                action_type="qpos",
-            )
+            if self.force_task_action_repeat is None:
+                result = task.take_action(
+                    torch_action,
+                    action_type="qpos",
+                )
+            else:
+                result = task.take_action(
+                    torch_action, action_type="qpos",
+                    action_repeat=self.force_task_action_repeat,
+                )
         elif self.control_mode == "delta_eef":
             if self.temporal_ensemble and self.temporal_ensemble_space == "delta_eef_qpos_rollout":
                 torch_action = sanitize_abs_joint_action(action, task)
