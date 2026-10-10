@@ -31,6 +31,11 @@ def _piano_cameras():
 
 @configclass
 class TaskCfg(MemoryTaskCfg):
+    # Support the full 1.345 m cabinet and robot base, with room at the edges.
+    # Keep the tabletop height and thickness used by the contact simulation.
+    plate = MemoryTaskCfg().plate
+    plate.spawn.scale = (1.30, 1.70, 1.0)
+    plate.init_state.pos = (.40, 0., 0.)
     memory_timeout_seconds = 30.0
     step_lim = 1800
     max_save_frames = 1900
