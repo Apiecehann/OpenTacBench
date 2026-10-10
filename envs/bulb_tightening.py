@@ -1311,6 +1311,8 @@ def box_mesh(width, depth, height, counts=(5,5,5)):
 class Task(LegacyBulbTask):
     def __init__(self,cfg,**kwargs):
         self.params=task_parameters(cfg)
+        from ._force_task_utils import motion_speed_scale
+        self.motion_speed_scale=motion_speed_scale(self.params)
         self.params.setdefault('public_tactile_grasp',True)
         self.params.setdefault('torque_tolerance_Nm',.012)
         for key,value in sample_physics('bulb_tightening',self.params.get('physics_seed',0)).items():
@@ -1747,6 +1749,7 @@ class Task(LegacyBulbTask):
         return self.failure is not None or self._accepted_result is False
 
     def _finish_bulb_episode(self):
+        from ._force_task_utils import motion_ticks
         if self._accepted_result is not None:
             return
         self._submission_requested=True
@@ -1778,13 +1781,15 @@ class Task(LegacyBulbTask):
             if self._accepted_result:
                 # Reveal the powered bulb only after the submitted result is
                 # frozen and terminal frames have been excluded from actions.
-                for k in range(90):
-                    manager.set_gripper(min(.039,qpos+(k+1)*.00025),force=True)
+                opening_ticks=motion_ticks(90,self.motion_speed_scale)
+                for k in range(opening_ticks):
+                    manager.set_gripper(min(.039,qpos+(k+1)*.00025*90/opening_ticks),force=True)
                     self._step(is_save=True)
                 origin=manager.get_gripper_center_pose()
                 revealed=True
-                for k in range(150):
-                    center=Pose(origin.p+[0.,0.,.060*(k+1)/150.],origin.q)
+                lift_commands=motion_ticks(300,self.motion_speed_scale)//2
+                for k in range(lift_commands):
+                    center=Pose(origin.p+[0.,0.,.060*(k+1)/lift_commands],origin.q)
                     if not self._ik_to_center(center):
                         revealed=False;break
                 self.metadata['bulb_terminal_reveal_completed']=revealed
@@ -1825,6 +1830,7 @@ class Task(LegacyBulbTask):
 
     def _position_empty_wrist(self):
         from ._force_task_utils import execute_joint_target
+        from ._force_task_utils import motion_ticks
         manager=self._robot_manager
         joints=manager.robot.data.joint_pos[:,manager._arm_ids][0].clone()
         target=float(self.controller_spin_sign)*1.65
@@ -1833,8 +1839,9 @@ class Task(LegacyBulbTask):
             self.failure='wrist_range_not_available';return False
         begin=self.step_count
         self.atom_id+=1;self.atom_tag='position_empty_wrist'
-        for tick in range(2,121,2):
-            alpha=tick/120
+        duration=motion_ticks(120,self.motion_speed_scale)
+        for tick in range(2,duration+1,2):
+            alpha=tick/duration
             alpha=alpha*alpha*(3-2*alpha)
             command=joints.clone()
             command[-1]=float(joints[-1])+(target-float(joints[-1]))*alpha

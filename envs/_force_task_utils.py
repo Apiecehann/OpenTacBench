@@ -353,6 +353,19 @@ PHYSICS_HZ = 120
 
 POLICY_HZ = 60
 
+
+def motion_speed_scale(parameters):
+    """Time scaling for motion only; physical holds and acceptance stay fixed."""
+    value = parameters.get("motion_speed_scale", 1.0)
+    if isinstance(value, bool) or not math.isfinite(float(value)) or not 1. <= float(value) <= 3.:
+        raise ValueError("motion_speed_scale must be finite and between 1 and 3")
+    return float(value)
+
+
+def motion_ticks(legacy_ticks, scale, quantum=ACTION_REPEAT):
+    """Retain both endpoints and the public control clock when shortening a move."""
+    return max(quantum, int(math.ceil(legacy_ticks / scale / quantum)) * quantum)
+
 def configure_final_task(cfg, parameters, *, max_policy_seconds):
     if not math.isclose(float(cfg.sim.dt), 1.0 / PHYSICS_HZ, abs_tol=1e-12):
         raise ValueError('Final tasks require120Hz physics and60Hz policy timing')

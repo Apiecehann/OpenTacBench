@@ -31,6 +31,7 @@ episode_num: 1
 use_seed: true
 skip_pre_move: false
 task_parameters:
+  motion_speed_scale: 3.0
   initial_depth_m: 0.014
   seat_top_m: 0.022
   grip_depth_mm: 27.2

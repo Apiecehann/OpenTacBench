@@ -1,0 +1,17 @@
+sensor_type: gsmini
+decimation: 1
+save_frequency: 2
+video_frequency: 2
+render_frequency: 2
+random_texture: false
+save_pre_move: true
+tactile_video_key: rgb_marker
+observations:
+  camera: [rgb]
+  tactile: [rgb, rgb_marker, depth, marker, pose]
+  embodiment: [joint, ee]
+save_dir: ./data
+start_seed: 0
+max_seed: 99
+episode_num: 1
+use_seed: true
