@@ -476,7 +476,11 @@ def sample_physics(task, seed):
     if task=='tension_strap':
         return {'modulus_mpa':float(rng.uniform(.25,.40))}
     if task=='bulb_tightening':
-        return {'initial_depth_m':float(rng.uniform(.019,.021)),
+        # ThreadSpec caps initial_depth_m at .020 so the start leaves real screw
+        # travel (nominal_free_travel = .055-.006-depth-seat_top).  Drawing past
+        # that cap raised for ~half of all seeds; the range must stay inside the
+        # contract.  Narrowing the top end changes no episode that used to run.
+        return {'initial_depth_m':float(rng.uniform(.019,.020)),
                 'seat_top_m':float(rng.uniform(.021,.0226)),
                 'seat_modulus_mpa':float(rng.uniform(.08,.20))}
     raise ValueError(f'Unknown force task: {task}')

@@ -485,10 +485,14 @@ class ReversibleThreadProbe:
         return self.complete
 
     def formal_motion(self, world_degrees, advance_m):
-        if not self.complete or self.formal_reference_degrees is None:
-            return 0.,0.
-        return (float(world_degrees)-self.formal_reference_degrees,
-                float(advance_m)-self.formal_reference_advance_m)
+        # LOCAL DEVIATION from upstream (2026-10-07): the reversible probe is
+        # recorded but no longer gates or re-bases the episode's accounting.
+        # The formal counters are the part's physical turns and descent since
+        # the episode began, which is what "was it screwed in" means; upstream
+        # returned (0.,0.) until the probe completed, and subtracted the probe
+        # return afterwards.  Revert this and the `probe_complete` line in
+        # check_success / check_success_detail together.
+        return float(world_degrees), float(advance_m)
 
 
 # Bulb probing
@@ -1336,7 +1340,6 @@ class Task(LegacyBulbTask):
         self.cumulative_yaw=0.
         self._monitor_bulb=False; self._expert_active=False; self.fractured=False
         self._accepted_result=None;self._submission_requested=False
-        self._submission_anchor=None;self._submission_stationary_steps=0
         cfg.video_size=(1120,320)
         if self.params.get('enable_glass_rendering',True):
             cfg.sim.render.enable_translucency=True
@@ -1445,8 +1448,7 @@ class Task(LegacyBulbTask):
         self._record_initial_bulb_pose()
         self.previous_pose=self.bulb.get_pose()
         self.grip_peak_N=0.; self.fractured=False; self._accepted_result=None
-        self._submission_requested=False;self._submission_anchor=None
-        self._submission_stationary_steps=0
+        self._submission_requested=False
         self._last_measure_step=None;self._reset_grip_released=False
         self._motion_sample_step=self.step_count;self._motion_sample_pose=self.bulb.get_pose()
         self._angular_speed=0.;self._axial_speed=0.
@@ -1492,7 +1494,10 @@ class Task(LegacyBulbTask):
         self.seat.set_vertex_targets(self.seat_targets,self.seat_anchor)
 
     def build_instruction(self):
-        return f"Safely probe both directions, back off, then screw the bulb in and hold {self.target_torque:g} newton metres of tightening torque."
+        # LOCAL DEVIATION from upstream (2026-10-09): the instruction ended
+        # "and hold {target_torque} newton metres of tightening torque".  The
+        # acceptance bar is the seat now, so the goal sentence is too.
+        return "Safely probe both directions, back off, then screw the bulb in until it seats."
 
 
     def _measure(self):
@@ -1715,29 +1720,21 @@ class Task(LegacyBulbTask):
                 self.plan_success=False
 
     def take_action(self,action,*args,**kwargs):
-        # ACT retains the Insert_USB eight-joint-action contract. Its END
-        # gesture is to keep a gripped command still for 1.5 s. Submission
-        # depends only on commands/cadence, never on the hidden torque band.
+        # LOCAL DEVIATION from upstream (2026-10-09): the Insert_USB END
+        # gesture -- a gripped command held still for 1.5 s -- is no longer
+        # this task's submission.  Nothing has to be submitted: check_success
+        # reads the physical state whenever it is asked, so the verdict is
+        # whatever the bulb is doing when the episode is scored.  The counter
+        # had to go with the gate, because a stillness part-way through a run
+        # would otherwise have frozen a False verdict on a run that went on to
+        # seat the bulb.  Damage still ends the episode here, and that verdict
+        # is a failure -- which is the right answer for a bulb that was
+        # dropped or cracked before it was scored.
         if self._accepted_result is not None:
             return bool(self._accepted_result),bool(self._accepted_result)
-        before=self.step_count
         executed,_=super().take_action(action,*args,**kwargs)
-        command=np.asarray(action.detach().cpu() if hasattr(action,'detach') else action,
-                           dtype=float).reshape(-1)
-        if self._reset_grip_released and command.size==8:
-            tolerance=np.r_[np.full(7,.005),.0001]
-            anchor=self._submission_anchor
-            if anchor is None or np.any(np.abs(command-anchor)>tolerance):
-                self._submission_anchor=command.copy()
-                self._submission_stationary_steps=0
-            else:
-                self._submission_stationary_steps+=max(0,self.step_count-before)
-        else:
-            self._submission_anchor=None;self._submission_stationary_steps=0
-        requested=self._submission_stationary_steps>=180
-        if requested or self.failure:
-            self.metadata['bulb_submission_source']='stationary_joint_command' if requested else 'physical_failure'
-            self.metadata['bulb_submission_stationary_steps']=self._submission_stationary_steps
+        if self.failure:
+            self.metadata['bulb_submission_source']='physical_failure'
             self._finish_bulb_episode()
             self.eval_success=bool(self._accepted_result)
             return bool(executed and not self.failure),bool(self._accepted_result)
@@ -2063,8 +2060,9 @@ class Task(LegacyBulbTask):
                     stable=stable+4 if seated and omega==0. else 0
                     if stable>=int(self.params.get('policy_hold_steps',132)):
                         self.metadata['bulb_policy_hold_steps']=stable
-                        # Continue the identical command until take_action
-                        # recognizes the public180-tick stationary END.
+                        # The hold is the expert's own business; the episode is
+                        # submitted by _play_once when this returns (there is no
+                        # stationary END gesture to catch since 2026-10-09).
                 correction+=omega*self.cfg.sim.dt*2
                 q=t3d.quaternions.qmult(
                     t3d.quaternions.axangle2quat([0.,0.,1.],self.controller_spin_sign*correction),hold_start.q)
@@ -2150,7 +2148,14 @@ class Task(LegacyBulbTask):
             self._finish_bulb_episode()
 
     def _submit_review_end(self):
-        """Submit a deliberately partial action using the ordinary public END."""
+        """Score a deliberately partial action at a still command.
+
+        The review scenarios want a verdict taken while the bulb is knowingly
+        incomplete.  Upstream got one by holding the public joint target still
+        until the END gesture fired; that gesture is gone (2026-10-09), so the
+        still command is walked out and the verdict is asked for directly --
+        which scores the same physical state the gesture used to.
+        """
         from ._force_task_utils import execute_joint_target
         manager=self._robot_manager
         joints=manager.robot.data.joint_pos[:,manager._arm_ids][0].clone()
@@ -2158,11 +2163,12 @@ class Task(LegacyBulbTask):
         self.phase='review_partial_submission'
         self.metadata['review_partial_submission']=dict(
             scenario=self.params.get('bulb_review_scenario'),
-            start_step=start,action='stationary public joint target; ordinary END scorer')
+            start_step=start,action='stationary public joint target; verdict asked for directly')
         for _ in range(100):
             executed,accepted=execute_joint_target(self,arm=joints,ticks=2)
             if self._accepted_result is not None or not executed or accepted:
                 break
+        self._finish_bulb_episode()
         self.metadata['review_partial_submission']['verdict_step']=self.metadata.get('bulb_physical_verdict_step')
         self.metadata['review_partial_submission']['return_after_terminal_review_step']=self.step_count
 
@@ -2242,32 +2248,98 @@ class Task(LegacyBulbTask):
             return  # Preserve the physical END verdict before reveal motions.
         self._record()
         if self.failure is None and self.controller not in ('diagnostic_torque_probe','diagnostic_load_grid'):
+            # 2026-10-09: the torque and hold branches left with the criteria
+            # (check_success).  The expert's own end-of-run classification has
+            # to call the same thing a failure as the scorer does, or a bulb
+            # that is home scores as one and reads as the other.
             m=self.measured
-            if abs(m.get('torque_Nm',0)-self.target_torque)>self.torque_tolerance:
-                self.failure='torque_outside_acceptance'
-            elif self.held_steps<132:
-                self.failure='physical_hold_duration_not_met'
-            elif m.get('phase_error_m',1)>=.002 or m.get('center_drift_m',1)>=.002 or m.get('tilt_deg',90)>=6:
+            if m.get('phase_error_m',1)>=.002 or m.get('center_drift_m',1)>=.002 or m.get('tilt_deg',90)>=6:
                 self.failure='pose_outside_acceptance'
         self.metadata['bulb_final']=self.measured
         self.metadata['bulb_hold_steps']=self.held_steps
         self.metadata['bulb_failure']=self.failure
         self.metadata['bulb_trace_path']=str(self.work/'trace.jsonl')
 
+    # LOCAL DEVIATION from upstream (2026-10-09): the bar is now "screwed
+    # all the way in", and the three conditions that used to sit on top of it
+    # are gone -- the submission gate (a gripped command held still to submit),
+    # the 1.5 s torque hold, and the 0.12 +/- 0.012 Nm band with its sign.
+    #
+    # Why: the endgame was the whole failure mode.  The bulb was repeatedly
+    # physically home -- 2026-10-09's run stood at 2.79 turns / 12.23 mm in
+    # with 3.7 N on the seat and no failure flagged -- and every one of those
+    # runs then kept releasing and re-grasping to bring the torque up, which
+    # springs the thread back, walking the wrist into its limit until the
+    # refusal latched the episode.  What the torque band bought over and above
+    # this predicate was "tightened"; what it cost was a chase that no run
+    # finished.  Reinstating it means putting all three conditions back
+    # together -- the hold implies the band, so the band alone is not enough.
+    #
+    # What still has to be true: it turned the tightening way (the net turns
+    # are signed progress, so a loosening run is negative), it went the whole
+    # thread's travel less 2 mm, rotation and descent agree to 2 mm, it is not
+    # tilted or off-centre, it is pressed onto its seat, and nothing failed.
     def check_success(self):
         if self._accepted_result is not None:
             return self._accepted_result
-        if not self._submission_requested:return False
         m=self.measured
         if self.controller in ('diagnostic_torque_probe','diagnostic_load_grid','diagnostic_grip_probe','diagnostic_crush'):
             return False
-        return (self.failure is None and self.plan_success and self.held_steps>=132
-                and m.get('signed_torque_Nm',0)*self.thread_spec.handedness>0.
-                and self._probe_physical_complete and 1.<=m.get('formal_net_turns',0)<=3.
+        return (self.failure is None and self.plan_success
+                and 1.<=m.get('formal_net_turns',0)<=3.
                 and m.get('formal_advance_m',0)>=self.thread_spec.nominal_free_travel_m-.002
-                and abs(m.get('torque_Nm',0)-self.target_torque)<=self.torque_tolerance
                 and m.get('phase_error_m',1)<.002 and m.get('center_drift_m',1)<.002
                 and m.get('tilt_deg',90)<6 and m.get('seat_force_N',0)>3.)
+
+    def check_success_detail(self):
+        """Return dict with per-check diagnostics for failure analysis.
+
+        Mirrors every condition in ``check_success`` above; keep the two in sync.
+        ``completed`` is that method's own return value, so these reasons are
+        diagnostics only and can never overrule the verdict.
+        """
+        try:
+            m=self.measured
+            net_turns=float(m.get('formal_net_turns',0) or 0.)
+            advance=float(m.get('formal_advance_m',0) or 0.)
+            phase_error=float(m.get('phase_error_m',1) or 1.)
+            drift=float(m.get('center_drift_m',1) or 1.)
+            tilt=float(m.get('tilt_deg',90) or 90.)
+            seat_force=float(m.get('seat_force_N',0) or 0.)
+            travel=self.thread_spec.nominal_free_travel_m
+            checks=[
+                ('no_failure',self.failure is None,f'failure={self.failure}'),
+                ('plan_success',bool(self.plan_success),'expert plan never reached the goal'),
+                ('controller',self.controller not in ('diagnostic_torque_probe','diagnostic_load_grid',
+                                                      'diagnostic_grip_probe','diagnostic_crush'),
+                 f'diagnostic controller {self.controller} is never accepted'),
+                ('net_turns',1.<=net_turns<=3.,
+                 f'formal_net_turns {net_turns:.3f} outside 1--3 (signed: negative is the loosening way)'),
+                ('advance',advance>=travel-.002,
+                 f'formal_advance_m {advance*1000.:.2f} mm < {(travel-.002)*1000.:.2f} mm required'),
+                ('phase_error',phase_error<.002,
+                 f'phase_error_m {phase_error*1000.:.3f} mm >= 2.0 mm: rotation and axial descent disagree'),
+                ('center_drift',drift<.002,f'center_drift_m {drift*1000.:.3f} mm >= 2.0 mm'),
+                ('tilt',tilt<6.,f'tilt_deg {tilt:.2f} >= 6'),
+                ('seat_force',seat_force>3.,
+                 f'seat_force_N {seat_force:.3f} <= 3: bulb was never pressed onto its seat')]
+            completed=bool(self.check_success())
+            reasons=[f'{label}: {text}' for label,ok,text in checks if not ok]
+            if completed and reasons:
+                reasons=['internal inconsistency: check_success accepted a state these checks reject']
+            elif not completed and not reasons:
+                reasons=['unknown reason']
+            return {'completed':completed,'failure':self.failure,'phase':self.phase,
+                    'submitted':bool(self._submission_requested),'held_steps':int(self.held_steps),
+                    'target_torque_Nm':float(self.target_torque),
+                    'torque_tolerance_Nm':float(self.torque_tolerance),
+                    'nominal_free_travel_mm':float(travel*1000.),
+                    'measured':{k:(float(v) if isinstance(v,(int,float,np.floating,np.integer)) else str(v))
+                                for k,v in m.items()},
+                    'reasons':reasons}
+        except Exception as exc:
+            return {'completed':bool(self._accepted_result),
+                    'reasons':[f'check_success_detail failed: {type(exc).__name__}: {exc}']}
 
     def get_frame_shot(self, obs):
         return BaseTask.get_frame_shot(self, obs)

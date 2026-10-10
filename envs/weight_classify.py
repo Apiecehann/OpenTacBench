@@ -127,6 +127,16 @@ class Task(BaseTask):
 
         self.move(self.atom.open_gripper(0.5))
 
+        target_pose = self.block.get_pose().add_bias([0.0, 0.0, 0.04 + 0.01 * self.rng.random()])
+        cpose = construct_grasp_pose(target_pose.p, [0, 0, 1], [1, 0, 0])
+        cid = self.block.register_point(cpose, type='contact')
+        self.move(self.atom.grasp_actor(
+            self.block, contact_point_id=cid, pre_dis=0.04, dis=0.0, is_close=False
+        ))
+        # EE is now positioned at the block with gripper open.
+        # The LLM is responsible for close_gripper(), weight sensing,
+        # classification, and placement.
+
     def _play_once(self):
         grasp_rotate = self.rng.uniform(-np.pi / 36, np.pi / 36)
         target_pose = self.block.get_pose().add_bias([0.0, 0.0, 0.035 + 0.01 * self.rng.random()])\

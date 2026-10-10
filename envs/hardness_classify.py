@@ -129,6 +129,16 @@ class Task(BaseTask):
 
         self.move(self.atom.open_gripper(0.5), tag="open_gripper_for_hardness_block")
 
+        target_pose = self.block.get_pose().add_bias([0.0, 0.0, 0.04 + 0.01 * self.rng.random()])
+        cpose = construct_grasp_pose(target_pose.p, [0, 0, 1], [1, 0, 0])
+        cid = self.block.register_point(cpose, type='contact')
+        self.move(self.atom.grasp_actor(
+            self.block, contact_point_id=cid, pre_dis=0.04, dis=0.0, is_close=False
+        ), tag="position_at_hardness_block")
+        # EE is now positioned at the block with gripper open.
+        # The LLM is responsible for close_gripper(), hardness sensing,
+        # classification, and placement.
+
     def _play_once(self):
         grasp_rotate = self.rng.uniform(-np.pi / 36, np.pi / 36)
         target_pose = self.block.get_pose().add_bias([0.0, 0.0, 0.04 + 0.01 * self.rng.random()])\
@@ -185,3 +195,37 @@ class Task(BaseTask):
             "success": bool(success),
         }
         return success
+
+    def check_success_detail(self):
+        """Return dict with per-check diagnostics for failure analysis."""
+        block_pose = self.block.get_pose().rebase(self.target_pose)
+        pos_err = np.abs(block_pose.p)
+        tilt_cos = float(np.dot(
+            block_pose.to_transformation_matrix()[:3, 2], np.array([0, 0, 1])
+        ))
+        completed = bool(
+            np.all(pos_err < np.array([0.04, 0.04, 0.01])) and tilt_cos > 0.965
+        )
+        reasons = []
+        if not completed:
+            if pos_err[0] >= 0.04:
+                reasons.append(f"X off by {pos_err[0] * 100:.1f} cm (max 4 cm)")
+            if pos_err[1] >= 0.04:
+                reasons.append(f"Y off by {pos_err[1] * 100:.1f} cm (max 4 cm)")
+            if pos_err[2] >= 0.01:
+                reasons.append(f"Z off by {pos_err[2] * 100:.1f} cm (max 1 cm)")
+            if tilt_cos <= 0.965:
+                reasons.append(
+                    f"tilted {np.degrees(np.arccos(min(tilt_cos, 1.0))):.0f}° (max 15°)"
+                )
+            if not reasons:
+                reasons.append("unknown reason")
+        return {
+            "hardness_label": self.choice,
+            "target_plate": self.target.cfg.name,
+            "block_pose_in_target": block_pose.tolist(),
+            "pos_error_cm": (pos_err * 100).tolist(),
+            "tilt_cos": tilt_cos,
+            "completed": completed,
+            "reasons": reasons,
+        }

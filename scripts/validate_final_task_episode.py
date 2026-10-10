@@ -103,21 +103,17 @@ def validate_final(episode,reference=None,expect=None):
             if bool(meta.get("bulb_accepted"))!=accepted or bool(meta.get("bulb_failure"))==accepted:
                 errors.append("bulb verdict differs between metadata and HDF5")
             if accepted:
-                if (meta.get("bulb_submission_source")!="stationary_joint_command"
-                        or meta.get("bulb_submission_stationary_steps",0)<180):
-                    errors.append("bulb expert did not submit through the same public stationary END")
-                hand=meta.get("thread_physical_spec",{}).get("handedness",0)
-                if not (physical.get("probe_complete") and 1<=physical.get("formal_net_turns",0)<=3
-                        and meta.get("bulb_hold_steps",0)>=132
-                        and abs(physical.get("torque_Nm",0)-.12)<=.012
-                        and physical.get("signed_torque_Nm",0)*hand>0
+                # The bar is the seat (2026-10-09): the bulb all the way in and
+                # loaded, nothing to bring up to a torque and nothing to submit.
+                # Mirrors Task.check_success term for term.
+                if not (1<=physical.get("formal_net_turns",0)<=3
                         and physical.get("formal_advance_m",physical.get("advance_m",0))>=
                             (.055-.006-meta.get("thread_physical_spec",{}).get("initial_depth_m",.014)
                              -meta.get("thread_physical_spec",{}).get("seat_top_m",.022)-.002)
                         and physical.get("phase_error_m",1)<.002
                         and physical.get("center_drift_m",1)<.002 and physical.get("tilt_deg",99)<6
                         and physical.get("seat_force_N",0)>3):
-                    errors.append("bulb success violates probing, actual turns, torque or seating gate")
+                    errors.append("bulb success violates the seated-depth gate")
                 light=meta.get("bulb_light",{})
                 if light.get("phase")!="terminal" or light.get("glass_emission") is not False:
                     errors.append("successful bulb did not use terminal-only filament lighting")

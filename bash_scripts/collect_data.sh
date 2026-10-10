@@ -34,7 +34,7 @@ RUN_OUTPUT_DIR="${OUTPUT_ROOT}"
 RUN_LOG_DIR="${LOG_ROOT}/${RUN_NAME}"
 SUMMARY_FILE="${RUN_LOG_DIR}/summary.tsv"
 
-source /opt/conda/etc/profile.d/conda.sh
+source /home/lipengfei/miniconda3/etc/profile.d/conda.sh
 conda activate "${CONDA_ENV}"
 cd "${PROJECT_ROOT}"
 
