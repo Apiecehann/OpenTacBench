@@ -107,7 +107,7 @@ def validate_final(episode,reference=None,expect=None):
                         or meta.get("bulb_submission_stationary_steps",0)<180):
                     errors.append("bulb expert did not submit through the same public stationary END")
                 hand=meta.get("thread_physical_spec",{}).get("handedness",0)
-                if not (physical.get("probe_complete") and 1<=physical.get("formal_net_turns",0)<=3
+                if not (physical.get("probe_complete") and 1.5<=physical.get("formal_net_turns",0)<=3
                         and meta.get("bulb_hold_steps",0)>=132
                         and abs(physical.get("torque_Nm",0)-.12)<=.012
                         and physical.get("signed_torque_Nm",0)*hand>0

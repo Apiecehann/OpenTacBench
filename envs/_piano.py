@@ -37,7 +37,107 @@ def keyboard_layout():
     return tuple(keys)
 
 
-MELODY = (64, 62, 60, 62, 64)  # E4 D4 C4 D4 E4; five adjacent notes.
+MELODY = (60, 60, 67, 67, 69)  # Twinkle, Twinkle, Little Star: C4 C4 G4 G4 A4.
+
+
+def press_delta(force_history, target, tolerance=.45):
+    """Position servo in metres; reject a one-tick landing impulse.
+
+    The three 120 Hz samples only filter the controller. Physical scoring and
+    overload checks still consume every raw contact force without filtering.
+    """
+    import numpy as np
+    force = float(np.median(force_history))
+    delta = (-.000075 if force<target-tolerance
+             else float(np.clip((force-target)*.00004,-.000075,.00010)))
+    return delta, force
+
+
+def striker_mesh():
+    """Rounded tapping stylus, in metres; identical FEM and visible surface.
+
+    Flat opposing grip faces remain 26 mm apart. The 7.8 mm compliant tip
+    and 108 mm overall length keep the tool suitable for individual keys.
+    Rings resolve the tip bevel, shaft, tapered ferrule and capped handle.
+    """
+    import numpy as np
+
+    # z, half-width, corner radius. The lower 9 mm is the compliant tip.
+    profile = [
+        (0., .0035, .0007), (.0008, .0039, .0011),
+        (.0045, .0039, .0011), (.009, .0039, .0011),
+        (.010, .0038, .0012), (.018, .0038, .0012),
+        (.027, .0038, .0012), (.036, .0038, .0012),
+        (.045, .0038, .0012), (.054, .0038, .0012),
+        (.056, .0043, .0015), (.060, .009, .0025),
+        (.063, .0125, .003), (.064, .013, .0035),
+        (.066, .013, .0035), (.067, .0128, .0035),
+        (.071, .013, .0035), (.077, .013, .0035),
+        (.084, .013, .0035), (.091, .013, .0035),
+        (.098, .013, .0035), (.102, .013, .0035),
+        (.103, .013, .0035), (.105, .013, .0035),
+        (.107, .0124, .0033), (.108, .0114, .003),
+    ]
+    points = []
+    for z, half, radius in profile:
+        points.append((0., 0., z))
+        for quadrant in range(4):
+            a = quadrant*np.pi/2
+            cx, cy = (half-radius)*np.array([
+                1 if quadrant in (0,3) else -1,
+                1 if quadrant in (0,1) else -1])
+            for angle in np.linspace(a, a+np.pi/2, 7):
+                points.append((cx+radius*np.cos(angle), cy+radius*np.sin(angle), z))
+    points = np.ascontiguousarray(points, dtype=float)
+    stride = 29
+    tets = []
+    for layer in range(len(profile)-1):
+        base, top = layer*stride, (layer+1)*stride
+        for i in range(28):
+            j = (i+1)%28
+            a,b,c,d,e,f = base,base+i+1,base+j+1,top,top+i+1,top+j+1
+            tets.extend(((a,b,c,f),(a,b,e,f),(a,d,e,f)))
+    tets = np.asarray(tets, dtype=np.int32)
+    det = np.linalg.det(np.stack([points[tets[:,i]]-points[tets[:,0]] for i in (1,2,3)],axis=-1))
+    flip = det<0
+    tets[flip,1],tets[flip,2] = tets[flip,2].copy(),tets[flip,1].copy()
+    return points, tets
+
+
+def finish_striker(task):
+    """Shade the actual deforming surface: soft tip, steel, brass and grip."""
+    import numpy as np
+    import omni.usd
+    from pxr import Usd, UsdGeom, UsdShade
+    from ._force_task_utils import _material
+
+    stage = omni.usd.get_context().get_stage()
+    meshes = [prim for env in task.scene.env_prim_paths
+              for prim in Usd.PrimRange(stage.GetPrimAtPath(env+'/striker'))
+              if prim.IsA(UsdGeom.Mesh)]
+    if not meshes:
+        raise RuntimeError('Piano striker has no deforming render surface')
+    for prim in meshes:
+        path = str(prim.GetPath())
+        mesh = UsdGeom.Mesh(prim)
+        vertices = np.asarray(mesh.GetPointsAttr().Get(),float)
+        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(),int).reshape(-1,3)
+        z = vertices[faces].mean(axis=1)[:,2]-vertices[:,2].min()
+        groups = np.select([z<.009, z<.056, z<.067, z<.102],
+                           ['SoftTip','Steel','Brass','Grip'], default='Brass')
+        looks = {
+            'SoftTip': ((.87,.82,.70),.88,0.),
+            'Steel': ((.36,.40,.43),.28,.8),
+            'Brass': ((.54,.33,.10),.28,.78),
+            'Grip': ((.025,.09,.085),.62,0.),
+        }
+        for name,(color,roughness,metallic) in looks.items():
+            material = _material(stage,str(path)+'/Looks/'+name,color,roughness,metallic)
+            subset = UsdGeom.Subset.Define(stage,str(path)+'/'+name)
+            subset.CreateElementTypeAttr('face')
+            subset.CreateFamilyNameAttr('materialBind')
+            subset.CreateIndicesAttr(np.flatnonzero(groups==name).tolist())
+            UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)
 
 
 def build_cabinet(task):

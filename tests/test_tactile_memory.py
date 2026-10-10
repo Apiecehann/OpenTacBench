@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from envs._tactile_memory import PianoScore, box_mesh
-from envs._piano import keyboard_layout, MELODY
+from envs._piano import keyboard_layout, striker_mesh, press_delta, MELODY
 
 
 def test_full_piano_layout_has_standard_endpoints_and_black_key_groups():
@@ -20,6 +20,7 @@ def test_full_piano_layout_has_standard_endpoints_and_black_key_groups():
 
 
 def test_five_note_phrase_scores_repeated_keys_and_rejects_distant_keys():
+    assert MELODY == (60,60,67,67,69)
     sequence = tuple(m-21 for m in MELODY)
     score = PianoScore(key_sequence=sequence,key_count=88)
     for key,note in zip(sequence,score.notes):
@@ -35,6 +36,37 @@ def test_five_note_phrase_scores_repeated_keys_and_rejects_distant_keys():
     forces[0] = 1.5
     bad.advance(forces)
     assert bad.failure == 'wrong_key'
+
+
+def test_striker_has_valid_solid_tets_and_single_key_tip():
+    points,tets = striker_mesh()
+    determinants = np.linalg.det(np.stack([points[tets[:,i]]-points[tets[:,0]] for i in (1,2,3)],axis=-1))
+    assert np.all(determinants>1e-14)
+    assert points[:,2].min() == 0.
+    assert points[:,2].max() == pytest.approx(.108)
+    grip = points[(points[:,2]>.070)&(points[:,2]<.100)]
+    np.testing.assert_allclose(np.ptp(grip[:,:2],axis=0),[.026,.026])
+    tip = points[points[:,2]<=.009]
+    assert np.ptp(tip[:,0])<.008 and np.ptp(tip[:,1])<.008
+    faces = np.concatenate([tets[:,[0,1,2]],tets[:,[0,1,3]],tets[:,[0,2,3]],tets[:,[1,2,3]]])
+    faces,counts = np.unique(np.sort(faces,axis=1),axis=0,return_counts=True)
+    assert counts.max()==2
+    boundary = faces[counts==1]
+    edges = np.concatenate([boundary[:,[0,1]],boundary[:,[1,2]],boundary[:,[0,2]]])
+    _,edge_counts = np.unique(np.sort(edges,axis=1),axis=0,return_counts=True)
+    assert np.all(edge_counts==2)  # closed, manifold exterior; no internal cracks
+
+
+def test_piano_landing_impulse_does_not_command_an_early_lift():
+    # Recorded failed reset: first touch peaked at 1.735 N, and the previous
+    # controller lifted 9.4 um, followed by 0.158 and 0.095 N / early release.
+    delta,_ = press_delta([0.,0.,1.735],1.5)
+    assert -.000075<=delta<0.
+    delta,_ = press_delta([1.735,.158,.095],1.5)
+    assert delta<0.
+    assert press_delta([1.5]*3,1.5)[0]==0.
+    assert press_delta([3.]*3,3.)[0]==0.
+    assert 0.<press_delta([2.5]*3,1.5)[0]<=.0001
 
 
 def test_box_tet_volume_and_storage():

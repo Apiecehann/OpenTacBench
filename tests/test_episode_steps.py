@@ -33,6 +33,7 @@ def test_terminal_review_is_separate_from_task_execution(tmp_path):
     (tmp_path/"hdf5").mkdir()
     for seed in (0,1):
         with h5py.File(tmp_path/f"hdf5/{seed}.hdf5","w") as h5:
+            h5.create_dataset("step",data=[98,100,298,302,400])
             phase = h5.create_group("phase")
             phase.attrs.update(policy_saved_frames=100,save_frequency=2,
                                policy_start_sim_step=100,terminal_id=2)
@@ -44,3 +45,6 @@ def test_terminal_review_is_separate_from_task_execution(tmp_path):
     assert row["policy_physics_steps_mean"] == 201
     assert row["terminal_physics_steps_mean"] == 274
     assert row["physics_steps_mean"] == 575
+    # Count actual stored rows, not half of the physical tick count.
+    assert row["saved_total_frames_mean"] == 5
+    assert row["saved_total_frames_n"] == 2

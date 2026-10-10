@@ -22,6 +22,8 @@ def summarize(root):
             # can leave an older successful file at the same seed/path.
             if item['result'] == 'success' and h5_path.exists():
                 with h5py.File(h5_path, "r") as h5:
+                    if "step" in h5:
+                        episode["saved_total_frames"] = len(h5["step"])
                     phase = h5.get("phase")
                     if phase is not None:
                         episode["saved_policy_frames"] = int(phase.attrs["policy_saved_frames"])
@@ -50,7 +52,7 @@ def summarize(root):
         success = [e for e in episodes if e["result"] == "success"]
         row = {"run": str(path.parent), "attempts": len(episodes), "successes": len(success)}
         for key in ("physics_steps", "preparation_physics_steps", "policy_physics_steps",
-                    "terminal_physics_steps", "saved_policy_frames"):
+                    "terminal_physics_steps", "saved_policy_frames", "saved_total_frames"):
             values = [e[key] for e in success if e.get(key) is not None]
             row[key+"_n"] = len(values)
             row[key+"_mean"] = statistics.mean(values) if values else None
@@ -71,6 +73,7 @@ def main():
         "policy_physics_steps": "executed ticks from policy handoff to verdict/terminal boundary",
         "terminal_physics_steps": "executed ticks after the verdict, excluded from policy actions",
         "saved_policy_frames": "recorded policy observations; not action calls or step_lim",
+        "saved_total_frames": "all rows actually recorded in HDF5, including preparation and terminal observations",
         "means": "successful episodes only; attempts and per-field sample counts are included"
     }, "runs":result}, indent=2))
 

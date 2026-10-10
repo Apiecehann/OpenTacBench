@@ -725,7 +725,13 @@ def sample_thread_spec(parameters):
     rng=np.random.default_rng(int(parameters.get("physics_seed",0))+71823)
     hand=int(parameters.get("thread_handedness",rng.choice([-1,1])))
     nominal=float(parameters.get("nominal_turns",rng.uniform(1.12,2.88)))
-    if not 1.0 <= nominal <= 3.0:raise ValueError("Nominal turns must be in [1,3]")
+    if 'nominal_turns' not in parameters:
+        # Conditional uniform sampling retains existing seeds already inside
+        # the new range. Leave margin for physical seat/probe compliance so
+        # the measured formal motion stays within 1.5--3 turns.
+        while nominal<1.55:
+            nominal=float(rng.uniform(1.12,2.88))
+    if not 1.5 <= nominal <= 3.0:raise ValueError("Nominal turns must be in [1.5,3]")
     # Nominal terminal travel includes the existing contact barrier and seat
     # compliance. The scorer always uses actual signed angle and axial motion.
     lead=float(parameters.get("thread_lead_m",.0123/nominal))
@@ -1313,6 +1319,10 @@ class Task(LegacyBulbTask):
         self.params=task_parameters(cfg)
         from ._force_task_utils import motion_speed_scale
         self.motion_speed_scale=motion_speed_scale(self.params)
+        thread_speed=self.params.get('thread_speed_scale',1.)
+        if isinstance(thread_speed,bool) or not np.isfinite(float(thread_speed)) or not 1.<=float(thread_speed)<=3.:
+            raise ValueError('thread_speed_scale must be finite and in [1, 3]')
+        self.thread_speed_scale=float(thread_speed)
         self.params.setdefault('public_tactile_grasp',True)
         self.params.setdefault('torque_tolerance_Nm',.012)
         for key,value in sample_physics('bulb_tightening',self.params.get('physics_seed',0)).items():
@@ -1887,7 +1897,8 @@ class Task(LegacyBulbTask):
             center=pose.add_bias([0.,0.,.058]).p
             grasp=Pose(center,self._robot_manager.get_gripper_center_pose().q)
             self.move(self.atom.move_to_pose(self._robot_manager.gripper_center_to_ee(grasp)),
-                      tag=f'recenter_regrasp_{index}',time_dilation_factor=.5,delay=False)
+                      tag=f'recenter_regrasp_{index}',
+                      time_dilation_factor=min(1.,.5*self.motion_speed_scale),delay=False)
         if self.params.get('public_tactile_grasp',False):
             if not self._close_bulb_public(index):
                 raise BulbDamageStop(self.failure or 'public_gripper_close_failed')
@@ -1908,15 +1919,21 @@ class Task(LegacyBulbTask):
         from ._force_task_utils import next_grip_qpos
         from ._force_task_utils import execute_joint_target
         manager=self._robot_manager
+        # Preserve the loading history used to calibrate the small reversible
+        # image probe. Once handedness is known, retime subsequent free closure.
+        grasp_speed=1. if self.controller_spin_sign is None else self.motion_speed_scale
         log=dict(grasp_index=index,depth_target_mm=float(self.params.get('grip_depth_mm',27.2)),
-            action_repeat=2,minimum_step_m=5e-6,maximum_step_m=1e-4,
+            action_repeat=2,minimum_step_m=5e-6,maximum_step_m=1e-4*grasp_speed,
+            contact_maximum_step_m=1e-4,
             inputs='existing bilateral raw tactile depth and current jaw position',samples=[])
         self.metadata.setdefault('public_grasp_control',[]).append(log)
         for _ in range(400):
             depths=self._tactile_manager.get_min_depth().detach().cpu().numpy()
             current=float(manager.get_gripper_qpos())
             try:
-                target=next_grip_qpos(depths,current,log['depth_target_mm'])
+                speed=1.+(grasp_speed-1.)*float(np.clip((np.min(depths)-28.5)/3.,0.,1.))
+                target=next_grip_qpos(depths,current,log['depth_target_mm'],
+                                      maximum_step_m=1e-4*speed)
             except ValueError:
                 self.failure='invalid_grasp_tactile';return False
             log['samples'].append(dict(step=self.step_count,qpos_m=current,
@@ -1980,13 +1997,16 @@ class Task(LegacyBulbTask):
         axial_trace=[]
         segment_lead=self.controller_lead_m
         segment_angle=np.pi if self.params.get('efficient_wrist_motion',False) else np.pi/2
-        command_scale=1.
-        skipped_ticks=0.
+        free_speed=self.thread_speed_scale
+        command_scale=free_speed
+        angle=0.
         seating_scale_trace=[]
         for tick in range(2,241,2):
             if self._accepted_result is not None:return True
-            skipped_ticks+=2*(1-command_scale)
-            angle=segment_angle*(tick-skipped_ticks)/240
+            # Integrate angle at the unchanged 60 Hz command cadence. Keep
+            # the same half-turn endpoint and physical feedback interval;
+            # slower seating corrections may use the full legacy budget.
+            angle=min(segment_angle,angle+segment_angle*2*command_scale/240)
             q=t3d.quaternions.qmult(
                 t3d.quaternions.axangle2quat([0.,0.,1.],self.controller_spin_sign*angle),start.q)
             center=Pose(start.p-[0.,0.,segment_lead*angle/(2*np.pi)+axial_correction],q)
@@ -2013,7 +2033,7 @@ class Task(LegacyBulbTask):
                 if self.params.get('progressive_seating_speed',False):
                     # Smaller commands after sensed seating load appears;
                     # physical overload thresholds remain independent.
-                    command_scale=.2 if sensed>self.target_torque/3 or seat_sensed>2. else 1.
+                    command_scale=.2 if sensed>self.target_torque/3 or seat_sensed>2. else free_speed
                     seating_scale_trace.append(dict(step=self.step_count,scale=command_scale,
                         sensed_torque_Nm=float(sensed),sensed_seat_force_N=float(seat_sensed)))
                 if self.params.get('axial_tactile_feedback',True):
@@ -2028,6 +2048,8 @@ class Task(LegacyBulbTask):
                     axial_correction=float(np.clip(axial_correction+adjustment,-.0015,.0015))
                     axial_trace.append(dict(step=self.step_count,shear_m=shear,
                         descent_correction_m=axial_correction))
+            if angle>=segment_angle-1e-12:
+                break
         self.metadata.setdefault('axial_tactile_control',[]).append(dict(
             segment=index,initial_estimated_lead_m=segment_lead,trace=axial_trace,
             final_descent_correction_m=axial_correction,
@@ -2270,7 +2292,7 @@ class Task(LegacyBulbTask):
             return False
         return (self.failure is None and self.plan_success and self.held_steps>=132
                 and m.get('signed_torque_Nm',0)*self.thread_spec.handedness>0.
-                and self._probe_physical_complete and 1.<=m.get('formal_net_turns',0)<=3.
+                and self._probe_physical_complete and 1.5<=m.get('formal_net_turns',0)<=3.
                 and m.get('formal_advance_m',0)>=self.thread_spec.nominal_free_travel_m-.002
                 and abs(m.get('torque_Nm',0)-self.target_torque)<=self.torque_tolerance
                 and m.get('phase_error_m',1)<.002 and m.get('center_drift_m',1)<.002

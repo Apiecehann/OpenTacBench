@@ -91,7 +91,7 @@ def validate_episode(path, expect=None):
                 errors.append('tool or fixed articulation missing')
             if 'memory_ground_truth' in meta or 'cue_result' in meta:
                 errors.append('obsolete cue matching is still present')
-            if [note['key']+21 for note in notes] != [64,62,60,62,64]:
+            if [note['key']+21 for note in notes] != [60,60,67,67,69]:
                 errors.append('incomplete or incorrect melody')
             for i, note in enumerate(notes):
                 long = i%2

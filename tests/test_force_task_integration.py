@@ -35,6 +35,18 @@ BASE_ACTION = method("envs/_base_task.py", "BaseTask", "take_action")
 BASE_ENV_STEP = method("envs/_base_task.py", "BaseTask", "env_step")
 
 
+@pytest.mark.parametrize('turns,accepted',[(1.49,False),(1.5,True),(2.8,True),(3.,True),(3.01,False)])
+def test_bulb_requires_one_and_a_half_to_three_actual_turns(turns,accepted):
+    score = method('envs/bulb_tightening.py','Task','check_success')
+    task = NS(_accepted_result=None,_submission_requested=True,
+        controller='diagnostic_force',failure=None,plan_success=True,held_steps=132,
+        _probe_physical_complete=True,thread_spec=NS(handedness=1,nominal_free_travel_m=.013),
+        target_torque=.12,torque_tolerance=.012,
+        measured=dict(signed_torque_Nm=.12,torque_Nm=.12,formal_net_turns=turns,
+            formal_advance_m=.012,phase_error_m=.0001,center_drift_m=0.,tilt_deg=0.,seat_force_N=4.))
+    assert score(task) is accepted
+
+
 class Robot:
     gripper_max_qpos = .039
 

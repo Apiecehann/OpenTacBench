@@ -97,7 +97,8 @@ def test_bulb_handedness_and_lead_preserve_physical_progress(hand, turns):
 def test_bulb_specs_are_seeded_and_vary():
     specs = [sample_thread_spec({"physics_seed": seed}) for seed in range(40)]
     assert {s.handedness for s in specs} == {-1, 1}
-    assert np.ptp([s.lead_m for s in specs]) > .004
+    assert np.ptp([s.lead_m for s in specs]) > .003
+    assert all(1.55<=.0123/s.lead_m<=2.88 for s in specs)
     assert sample_thread_spec({"physics_seed": 6}) == specs[6]
 
 @pytest.mark.parametrize("depths,q,expected", [

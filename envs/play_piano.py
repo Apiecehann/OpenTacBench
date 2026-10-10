@@ -1,14 +1,15 @@
 """Pick up a tapping tool and play a fixed phrase on an 88-key piano."""
 import numpy as np
+from collections import deque
 from transforms3d.quaternions import mat2quat
 
 from ._base_task import Pose, configclass
 from ._memory_task import MemoryTask, MemoryTaskCfg
 from ._tactile_memory import PianoScore, box_mesh
-from ._piano import keyboard_layout, build_cabinet, MELODY
+from ._piano import keyboard_layout, build_cabinet, striker_mesh, finish_striker, press_delta, MELODY
 from ._piano_audio import PianoContacts, add_piano_audio
 
-TASK_INSTRUCTION = ("Pick up the tapping tool and play E4 D4 C4 D4 E4. "
+TASK_INSTRUCTION = ("Pick up the tapping tool and play C4 C4 G4 G4 A4, the first five notes of Twinkle Twinkle Little Star. "
                     "Alternate short-light and long-firm notes, starting short-light.")
 
 
@@ -48,6 +49,7 @@ class Task(MemoryTask):
         self.audio_contacts = PianoContacts()
         self.video_steps = []
         self.key_forces = np.zeros(88)
+        self._key_force_history = deque((np.zeros(88) for _ in range(3)),maxlen=3)
         self.striker_released = False
         self._key_vertex_ids = None
         # A compliant probe tip makes force controllable at the 60 Hz action
@@ -81,14 +83,14 @@ class Task(MemoryTask):
             self.keys.append(key)
         # A slender tapping tool with a soft lower tip. A fully rigid steel tip
         # produced an impulsive >9 N first contact for a 0.2 mm command.
-        points,tets = box_mesh((.026,.026,.108),(2,2,12))
-        points[:,:2] *= np.where(points[:,2,None] < .063, .30, 1.)
+        points,tets = striker_mesh()
         self.striker = self.add_mesh("striker",points,tets,self.striker_position,
                                     fixed=True,modulus=50.,color=(.20,.23,.27))
         tip = points[tets].mean(axis=1)[:,2] < .009
         for attribute in ('mu','lambda'):
             values = view(self.striker.uipc_meshes[0].tetrahedra().find(attribute))
             values.reshape(-1)[tip] *= .002
+        finish_striker(self)
         contacts = self.uipc_sim.scene.contact_tabular()
         key_contact = contacts.create('piano_keys')
         resistance = self.cfg.uipc_sim.contact.default_contact_resistance * 1e9
@@ -96,6 +98,13 @@ class Task(MemoryTask):
         for key in self.keys:
             for mesh in key.uipc_meshes:
                 key_contact.apply_to(mesh)
+        # Fine surface fillets lie within the contact barrier of neighbouring
+        # faces on this intact stylus. It cannot fold back onto itself; retain
+        # contact with keys/jaws/table without artificial self-repulsion.
+        tool_contact = contacts.create('piano_striker')
+        contacts.insert(tool_contact,tool_contact,friction_rate=.3,resistance=resistance,enable=False)
+        for mesh in self.striker.uipc_meshes:
+            tool_contact.apply_to(mesh)
         build_cabinet(self)
 
     def _reset_actors(self):
@@ -106,6 +115,7 @@ class Task(MemoryTask):
         self.score = PianoScore(self.cfg.sim.dt,
                                key_sequence=tuple(m-21 for m in MELODY), key_count=88)
         self.key_forces = np.zeros(88)
+        self._key_force_history = deque((np.zeros(88) for _ in range(3)),maxlen=3)
         self.striker_released = False
         self.striker.set_pose(Pose(self.striker_position,[1.,0.,0.,0.]))
         for key,position in zip(self.keys,self.key_positions):
@@ -145,6 +155,7 @@ class Task(MemoryTask):
         loads = gradient[valid,2] / self.cfg.sim.dt**2
         self.key_forces = np.maximum(0.,np.bincount(labels[labels>=0],
             weights=loads[labels>=0],minlength=88))
+        self._key_force_history.append(self.key_forces.copy())
         self.audio_contacts.advance(self.step_count, self.key_forces)
         previous = self.score.index
         self.score.advance(self.key_forces)
@@ -193,18 +204,19 @@ class Task(MemoryTask):
                 break
             reached = False
             for _ in range(180):
-                force = self.key_forces[key_index]
-                error = note.force_N-force
                 # Limit impact on landing; contact hysteresis handles the small
                 # initial load transient independently of the note-force hold.
                 # The first contact can be much stiffer than the settled tip.
                 # Keep each 60 Hz descent below 75 microns so a low initial
                 # force cannot trigger a 250-micron impact on the next tick.
-                dz = -.000075 if force < .15 else float(np.clip(-error*.00004,-.000075,.00010))
+                dz,control_force = press_delta(
+                    [forces[key_index] for forces in self._key_force_history],
+                    note.force_N,note.tolerance_N)
                 position[2] += dz
                 continued = self.servo_center(position)
                 self.metadata['piano_pressure_trace'].append(dict(step=self.step_count,note=i,
                     key=key_index,force_N=float(self.key_forces[key_index]),
+                    controller_force_N=control_force,
                     max_force_N=float(self.key_forces.max()),max_key=int(self.key_forces.argmax()),
                     target_z=float(position[2])))
                 if not continued:

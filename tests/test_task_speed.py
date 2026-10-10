@@ -64,7 +64,8 @@ def test_empty_wrist_keeps_the_same_joint_path_and_endpoints(scale,sign):
     ('tension_strap','_close_strap_public',27.6),
     ('bulb_tightening','_close_bulb_public',27.2),
 ])
-def test_grasp_controllers_preserve_contact_and_only_accelerate_strap_free_travel(module,method,target_depth):
+@pytest.mark.parametrize('direction',[None,1])
+def test_grasp_controllers_preserve_probe_loading_and_contact(module,method,target_depth,direction):
     path = Path(__file__).resolve().parents[1]/('envs/'+module+'.py')
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='Task')
     node = next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name==method)
@@ -83,7 +84,7 @@ def test_grasp_controllers_preserve_contact_and_only_accelerate_strap_free_trave
         tensor.detach = lambda:tensor
         tensor.cpu = lambda:tensor
         task = SimpleNamespace(motion_speed_scale=scale,params={},metadata={},step_count=0,
-            failure=None,_accepted_result=None,
+            failure=None,_accepted_result=None,controller_spin_sign=direction,
             _robot_manager=SimpleNamespace(get_gripper_qpos=lambda:state['q']),
             _tactile_manager=SimpleNamespace(get_min_depth=lambda:tensor))
         scope = dict(np=np,next_grip_qpos=symbol('_force_task_utils','next_grip_qpos'),
@@ -94,8 +95,40 @@ def test_grasp_controllers_preserve_contact_and_only_accelerate_strap_free_trave
         assert all(delta<=1e-4+1e-12 for depth,delta in state['commands'] if depth<=28.5)
         return task.step_count,state['q']
     slow,fast = run(1.),run(3.)
-    if module == 'bulb_tightening':
-        assert fast == slow
+    if module=='bulb_tightening' and direction is None:
+        assert fast==slow
     else:
         assert fast[0]<slow[0]
     assert fast[1] == pytest.approx(slow[1],abs=2e-5)
+
+
+@pytest.mark.parametrize('scale',[1.,1.7,2.,3.])
+def test_thread_retiming_keeps_half_turn_pitch_and_sixty_hz_commands(scale):
+    import transforms3d as t3d
+    path = Path(__file__).resolve().parents[1]/'envs/bulb_tightening.py'
+    cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='Task')
+    method = next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_screw_segment')
+    def pose(p,q):
+        return SimpleNamespace(p=np.asarray(p),q=np.asarray(q))
+    start = pose([.55,0.,.1],[1.,0.,0.,0.])
+    task = SimpleNamespace(params={'efficient_wrist_motion':True,'thread_speed_scale':scale,
+        'progressive_seating_speed':True,'axial_tactile_feedback':False},
+        _accepted_result=None,controller_lead_m=.006,controller_spin_sign=-1,thread_speed_scale=scale,
+        controller='diagnostic_force',target_torque=.12,metadata={},failure=None,
+        step_count=0,_robot_manager=SimpleNamespace(get_gripper_center_pose=lambda:start))
+    commands = []
+    def command(target):
+        commands.append(target)
+        task.step_count += 2
+        return True
+    task._ik_to_center = command
+    task._record = lambda:dict(torque_Nm=0.,seat_force_N=0.,center_drift_m=0.,tilt_deg=0.)
+    scope = dict(np=np,t3d=t3d,Pose=pose)
+    exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),scope)
+    assert scope['_screw_segment'](task,1) is False
+    angles = np.array([t3d.quaternions.quat2axangle(p.q)[1] for p in commands])
+    assert angles[-1] == pytest.approx(np.pi)
+    assert np.all(np.diff(angles)>0)
+    assert task.step_count == 2*int(np.ceil(120/scale))
+    np.testing.assert_allclose([p.p[:2] for p in commands],np.tile(start.p[:2],(len(commands),1)))
+    np.testing.assert_allclose([p.p[2] for p in commands],.1-.006*angles/(2*np.pi))
