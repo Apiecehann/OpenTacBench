@@ -1,4 +1,4 @@
-"""Play a short phrase on an 88-key piano after remembering a tactile cue."""
+"""Pick up a tapping tool and play a fixed phrase on an 88-key piano."""
 import numpy as np
 from transforms3d.quaternions import mat2quat
 
@@ -6,9 +6,10 @@ from ._base_task import Pose, configclass
 from ._memory_task import MemoryTask, MemoryTaskCfg
 from ._tactile_memory import PianoScore, box_mesh
 from ._piano import keyboard_layout, build_cabinet, MELODY
+from ._piano_audio import PianoContacts, add_piano_audio
 
-TASK_INSTRUCTION = ("Feel the cue: one rib starts short-light, two ribs starts long-firm. "
-                    "Remember it, release the cue, and play E4 D4 C4 D4 E4 with alternating articulation.")
+TASK_INSTRUCTION = ("Pick up the tapping tool and play E4 D4 C4 D4 E4. "
+                    "Alternate short-light and long-firm notes, starting short-light.")
 
 
 def _piano_cameras():
@@ -43,7 +44,9 @@ class Task(MemoryTask):
     striker_grasp_height = .085
 
     def __init__(self, cfg, **kwargs):
-        self.score = PianoScore(0, key_sequence=tuple(m-21 for m in MELODY), key_count=88)
+        self.score = PianoScore(key_sequence=tuple(m-21 for m in MELODY), key_count=88)
+        self.audio_contacts = PianoContacts()
+        self.video_steps = []
         self.key_forces = np.zeros(88)
         self.striker_released = False
         self._key_vertex_ids = None
@@ -53,7 +56,6 @@ class Task(MemoryTask):
         super().__init__(cfg, **kwargs)
 
     def create_actors(self):
-        self.create_cues()
         self.keybed = self.add_box("keyboard_base",(.24,1.315,.034),(.54,0,.006),
                                    fixed=True,color=(.012,.015,.020))
         self.add_box("piano_back",(.14,1.31,.40),(.69,0,.06),fixed=True,color=(.012,.015,.020))
@@ -97,8 +99,11 @@ class Task(MemoryTask):
         build_cabinet(self)
 
     def _reset_actors(self):
-        self.reset_cue()
-        self.score = PianoScore(self.cue_kind,self.cfg.sim.dt,
+        self.monitor = False
+        self.failure = ""
+        self.audio_contacts = PianoContacts()
+        self.video_steps = []
+        self.score = PianoScore(self.cfg.sim.dt,
                                key_sequence=tuple(m-21 for m in MELODY), key_count=88)
         self.key_forces = np.zeros(88)
         self.striker_released = False
@@ -140,8 +145,9 @@ class Task(MemoryTask):
         loads = gradient[valid,2] / self.cfg.sim.dt**2
         self.key_forces = np.maximum(0.,np.bincount(labels[labels>=0],
             weights=loads[labels>=0],minlength=88))
+        self.audio_contacts.advance(self.step_count, self.key_forces)
         previous = self.score.index
-        self.score.advance(self.key_forces,memory_ready=self.memory.ready)
+        self.score.advance(self.key_forces)
         if self.score.index != previous or self.score.failure:
             self.metadata.setdefault('piano_contact_events',[]).append(dict(
                 step=self.step_count,previous_note=previous,next_note=self.score.index,
@@ -151,8 +157,7 @@ class Task(MemoryTask):
     def _play_once(self):
         self.metadata['piano_pressure_trace'] = []
         self.metadata['piano_geometry'] = []
-        if not self.touch_cue():
-            return
+        self.move(self.atom.open_gripper(.7),tag="manipulate",delay=False)
         grasp = np.asarray(self.striker_position)+[0,0,self.striker_grasp_height]
         self.move_center(grasp+[0,0,.06])
         self.move_center(grasp)
@@ -227,10 +232,27 @@ class Task(MemoryTask):
             position[2] += .015 if i == len(self.score.notes)-1 else .004
             if not self._line_to(position, spacing=.003):
                 break
-        self.metadata["memory_result"] = dict(success=self.check_success(),failure=self.failure,
-            cue_acquired=self.memory.acquired,notes=self.score.events,
+        self.metadata["piano_result"] = dict(success=self.check_success(),failure=self.failure,
+            notes=self.score.events,articulation="short_light_first_alternating",
+            tool_grasped=self.striker_released,
             force_source="physical UIPC key-top contact resultant",
             policy_steps=self.step_count-self.policy_start_step)
 
     def check_success(self):
-        return bool(self.score.success and self.memory.ready and not self.failure and self.plan_success)
+        return bool(self.score.success and self.striker_released and not self.failure and self.plan_success)
+
+    def get_frame_shot(self, obs):
+        frame = super().get_frame_shot(obs)
+        self.video_steps.append(int(self.step_count))
+        return frame
+
+    def clean_cache(self, mean_steps=0.0, result=None):
+        super().clean_cache(mean_steps, result)
+        if result is not None and self.cfg.video_frequency > 0:
+            video = self.save_video_path.with_name(f"{self.cfg.seed}_{result}.mp4")
+            if video.exists() and self.video_steps:
+                self.audio_contacts.finish(self.step_count)
+                self.metadata['piano_audio'] = add_piano_audio(
+                    video, self.audio_contacts.events, self.video_steps,
+                    fps=self.video_handler.fps)
+                self._save_metadata()

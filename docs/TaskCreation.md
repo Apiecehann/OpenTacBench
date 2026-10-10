@@ -270,19 +270,19 @@ bash collect_data.sh blind_pick blind_pick 0
 
 On fresh-process seeds 0, 1, and 2, complete retrieval passed in 841, 1148, and 873 physics ticks. The mean was 954 total ticks, 918 policy ticks, and 458.3 saved policy observations. Each object cleared the rim by about 48 mm and maintained bilateral contact for 46 ticks. Geometry, decoded observations, and terminal physical gates were checked in the collected episodes. The regular collector also completed seeds 3 and 4 in one process, including reset between episodes, in 873 and 831 ticks.
 
-## Piano articulation recall (`play_piano`)
+## Piano articulation (`play_piano`)
 
 The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The existing arm and tactile gripper pick up a slender tapping tool and play E4 D4 C4 D4 E4. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces; the tool has a compliant tip. Static box panels and piano supports are also exactly fixed so collision geometry stays aligned with the visual shells under gravity. Both key motion and fingertip reactions are simulated through UIPC contact.
 
-Before playing, the gripper touches a cue with one or two raised ribs, then releases it. One rib selects a short-light first note; two ribs select a long-firm first note. Subsequent notes alternate. Short notes require 1.5 ± 0.45 N for 0.20 s; long notes require 3.0 ± 0.45 N for 0.60 s. Scoring uses physical contact loads at every 120 Hz physics tick, including wrong-key presses, overload, early release, and late release. The cue must first be touched continuously for 12 ticks, then released for at least 12 ticks.
+The robot directly picks up the tapping tool and plays the fixed phrase. There is no tactile reference, cue-matching action, or randomized articulation label. Notes alternate short-light and long-firm, starting short-light: 1.5 ± 0.45 N for 0.20 s, then 3.0 ± 0.45 N for 0.60 s. Scoring uses physical key contact loads at every 120 Hz physics tick, including wrong-key presses, overload, early release, and late release. Success also requires acquisition of the tapping tool.
 
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
-The cue's fixed world volume is masked in both visual cameras, including depth if requested. Tactile views retain its physical relief. Policy observations omit actor poses, latent cue labels, seed, and identifying action tags. The scripted demonstrator is privileged; its success is not a learned-policy memory ablation. Human review videos use unmasked camera views, while recorded policy observations remain masked.
+Both head and wrist cameras show the scene without a cue mask. Policy observations omit actor poses, the seed, and privileged action tags. The scripted demonstrator uses physical key forces and geometry; its success is not a learned-policy memory ablation. Contact descent remains capped at 75 micrometres per 60 Hz update to limit the initial load transient without relaxing the note-force thresholds.
 
-Contact descent is capped at 75 micrometres per 60 Hz update: larger first-contact increments produced an impact overload on one seed even when the preceding force sample was small. The original force thresholds remain enforced. Fresh-process seeds 0, 1, and 2 passed the complete phrase in 1936, 1831, and 1934 physics ticks, covering both cue kinds. Means were 1900.3 total ticks, 1819.7 policy ticks, and 909 saved policy observations. In seed 0, short-note key travel was about 1.1 mm and long-note travel about 2.6 mm.
+Recorded videos include a synthesized piano soundtrack and a companion WAV. All 88 physical key contacts can trigger sound, including wrong keys; the renderer does not read the intended melody or successful-note labels. Contact onset/release determines timing, the actual peak contact force controls amplitude/brightness, and the physical key index determines pitch. Physical event steps are mapped to actual recorded frames, including the policy boundary. Sound uses decaying, slightly detuned partials and a release envelope; it is an audible presentation of the contact events, not a simulation of strings or room acoustics. Audio is generated at episode finalization, so headless collection produces playable sound without requiring an audio device.
 
-The regular collector also passed seeds 5 and 6 consecutively in one process, in 1966 and 1829 ticks. This checks reset with the cue changing from two ribs to one, including both complete five-note phrases.
+The direct-playing version passed seeds 0 and 1 consecutively in the regular collector, including reset between episodes, in 1576 and 1568 physics ticks. Means were 1572 total ticks, 1495 policy ticks, and 746.5 saved policy observations. Both episodes passed raw-data validation, contained five physical note events in the correct order, and produced fully decoded H.264 videos with AAC soundtracks (48 kHz). These are finite scripted demonstrations, not trained-policy results.
 
 Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 240 by 240 tactile views; blind search contains only the head view and tactile views.
 
@@ -295,6 +295,8 @@ bash collect_data.sh play_piano play_piano 0
 ## Motion speed and episode length
 
 `tension_strap` and `bulb_tightening` accept `task_parameters.motion_speed_scale` from 1 to 3. The code default is 1, preserving legacy timing. This parameter changes motion timing while retaining the 120 Hz physics clock, 60 Hz policy/recording cadence, acceptance thresholds, and required force/torque holds. Strap motion accelerates free gripper closure and tapers back to its original controller near contact and the force target. Bulb motion accelerates only the unloaded wrist return and terminal opening/lift; approach, grasp, probing, thread travel, seating, and torque holds retain their original timing. Retiming contact motion can change how many regrasp cycles the feedback controller needs, so it is excluded from the bulb speed profile.
+
+The current hold contract is not fully parameterized: strap acceptance uses a fixed three seconds per stage and the demonstrator uses a 3.30-second estimated-force dwell. Changing YAML `hold_seconds` alone does not change either. Bulb submission requires 180 stationary physics ticks, while physical success requires at least 132 stable ticks; changing `policy_hold_steps` alone does not shorten the stationary submission gate. A shorter task variant must update controller, scorer, recording validation, and regression cases together.
 
 The standard `tension_strap.yml` profile selects scale 3. On paired seeds 0, 1, and 2, both scale 1 and scale 3 succeeded in all three episodes. Total physics ticks were 2833/2870/2911 before and 1458/1490/1594 after: the mean fell from 2871.3 to 1514 (47.3%). Mean policy ticks fell from 2807.3 to 1450, and saved policy frames from 1403 to 724. Both force stages still require three seconds of sustained physical acceptance. Comparing recorded end-effector pose and jaw width after normalized path-length alignment gave maximum position differences of 0.186/0.066/0.083 mm and orientation differences of 0.100/0.038/0.021 degrees. This is a three-seed regression result, not a large-scale success-rate estimate.
 
@@ -316,6 +318,6 @@ The measurements above were collected on 2026-10-10 with Isaac Sim 4.5, Isaac La
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest \
-  tests/test_tactile_memory.py tests/test_blind_box.py tests/test_task_speed.py \
+  tests/test_tactile_memory.py tests/test_piano_audio.py tests/test_blind_box.py tests/test_task_speed.py \
   tests/test_episode_steps.py tests/test_four_force_tasks.py tests/test_force_task_integration.py -q
 ```

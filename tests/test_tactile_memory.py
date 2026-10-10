@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from envs._tactile_memory import CueMemory, PianoScore, box_mesh, cue_mesh
+from envs._tactile_memory import PianoScore, box_mesh
 from envs._piano import keyboard_layout, MELODY
 
 
@@ -19,123 +19,98 @@ def test_full_piano_layout_has_standard_endpoints_and_black_key_groups():
             assert key.strike_position[2] == pytest.approx(.085)
 
 
-@pytest.mark.parametrize('cue', [0,1])
-def test_five_note_phrase_scores_repeated_keys_and_rejects_distant_keys(cue):
+def test_five_note_phrase_scores_repeated_keys_and_rejects_distant_keys():
     sequence = tuple(m-21 for m in MELODY)
-    score = PianoScore(cue,key_sequence=sequence,key_count=88)
+    score = PianoScore(key_sequence=sequence,key_count=88)
     for key,note in zip(sequence,score.notes):
         forces = np.zeros(88)
         forces[key] = note.force_N
         for _ in range(round(note.hold_s/score.dt)):
-            score.advance(forces,memory_ready=True)
-        score.advance(np.zeros(88),memory_ready=True)
+            score.advance(forces)
+        score.advance(np.zeros(88))
     assert score.success
     assert [event['key']+21 for event in score.events] == list(MELODY)
-    bad = PianoScore(cue,key_sequence=sequence,key_count=88)
+    bad = PianoScore(key_sequence=sequence,key_count=88)
     forces = np.zeros(88)
     forces[0] = 1.5
-    bad.advance(forces,memory_ready=True)
+    bad.advance(forces)
     assert bad.failure == 'wrong_key'
 
 
-def test_cue_requires_continuous_touch_and_release():
-    memory = CueMemory()
-    for _ in range(11):
-        memory.advance(True)
-    memory.advance(False)
-    assert not memory.acquired
-    for _ in range(12):
-        memory.advance(True)
-    assert memory.acquired and not memory.ready
-    for _ in range(12):
-        memory.advance(False)
-    assert memory.ready
-    memory.advance(True)
-    assert not memory.ready
-
-
-def test_tet_volumes_and_two_distinct_cues():
-    for kind in (0,1):
-        points,tets = cue_mesh(kind)
-        volumes = np.linalg.det(np.stack([points[tets[:,i]]-points[tets[:,0]] for i in (1,2,3)],axis=-1))/6
-        assert (volumes > 0).all()
-        assert len(np.unique(tets)) == len(points)
-    assert not np.array_equal(cue_mesh(0)[0], cue_mesh(1)[0])
+def test_box_tet_volume_and_storage():
     points,tets = box_mesh((.1,.2,.3))
     assert points.flags.c_contiguous
     volume = np.linalg.det(np.stack([points[tets[:,i]]-points[tets[:,0]] for i in (1,2,3)],axis=-1)).sum()/6
     assert volume == pytest.approx(.006)
 
 
-@pytest.mark.parametrize("cue", [0,1])
-def test_piano_both_phrases_require_force_duration_and_release(cue):
-    score = PianoScore(cue)
+def test_piano_phrase_requires_force_duration_and_release():
+    score = PianoScore()
     for i,note in enumerate(score.notes):
         forces = [0.,0.]
         forces[i] = note.force_N
         for _ in range(round(note.hold_s/score.dt)):
-            score.advance(forces,memory_ready=True)
+            score.advance(forces)
         assert score.index == i
-        score.advance([0.,0.],memory_ready=True)
+        score.advance([0.,0.])
     assert score.success
     assert len(score.events) == 2
 
 
-@pytest.mark.parametrize("forces,ready,reason", [
-    ([1.5,0.],False,"cue_not_remembered"),
-    ([0.,1.5],True,"wrong_key"),
-    ([7.,0.],True,"key_overload"),
-    ([np.nan,0.],True,"invalid_key_force"),
+@pytest.mark.parametrize("forces,reason", [
+    ([0.,1.5],"wrong_key"),
+    ([7.,0.],"key_overload"),
+    ([np.nan,0.],"invalid_key_force"),
 ])
-def test_piano_rejects_invalid_contact(forces,ready,reason):
-    score = PianoScore(0)
-    score.advance(forces,memory_ready=ready)
+def test_piano_rejects_invalid_contact(forces,reason):
+    score = PianoScore()
+    score.advance(forces)
     assert score.failure == reason
     assert not score.success
 
 
 def test_long_force_cannot_count_as_short_note():
-    score = PianoScore(0)
+    score = PianoScore()
     for _ in range(12):
-        score.advance([3.,0.],memory_ready=True)
+        score.advance([3.,0.])
     assert score.failure == "wrong_note_force"
 
 
 def test_short_release_and_excessive_hold_fail():
-    score = PianoScore(0)
-    score.advance([1.5,0.],memory_ready=True)
-    score.advance([0.,0.],memory_ready=True)
+    score = PianoScore()
+    score.advance([1.5,0.])
+    score.advance([0.,0.])
     assert score.failure == "note_too_short"
-    score = PianoScore(0)
+    score = PianoScore()
     for _ in range(60):
-        score.advance([1.5,0.],memory_ready=True)
+        score.advance([1.5,0.])
     assert score.failure == "note_too_long"
 
 
 def test_interrupted_pressure_does_not_accumulate_into_a_note():
-    score = PianoScore(0)
+    score = PianoScore()
     for _ in range(4):
         for _ in range(10):
-            score.advance([1.5,0.],memory_ready=True)
-        score.advance([.7,0.],memory_ready=True)
-    score.advance([0.,0.],memory_ready=True)
+            score.advance([1.5,0.])
+        score.advance([.7,0.])
+    score.advance([0.,0.])
     assert score.failure == "note_too_short"
 
 
 def test_contact_settling_is_not_release_or_valid_note_hold():
-    score = PianoScore(0)
+    score = PianoScore()
     for force in (.38,.19,.4,.18,.7):
-        score.advance([force,0.],memory_ready=True)
+        score.advance([force,0.])
     assert not score.failure and score.pressed
     assert score.stable_steps == 0 and not score.events
     # Actual release before the required force-duration still fails.
-    score.advance([0.,0.],memory_ready=True)
+    score.advance([0.,0.])
     assert score.failure == 'note_too_short'
 
-    score = PianoScore(0)
+    score = PianoScore()
     for _ in range(24):
-        score.advance([1.5,0.],memory_ready=True)
-    score.advance([.19,0.],memory_ready=True)
+        score.advance([1.5,0.])
+    score.advance([.19,0.])
     assert score.index == 0
-    score.advance([0.,0.],memory_ready=True)
+    score.advance([0.,0.])
     assert score.index == 1 and not score.failure

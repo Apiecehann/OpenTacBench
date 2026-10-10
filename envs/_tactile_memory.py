@@ -1,4 +1,4 @@
-"""Simulation-independent contracts for the two tactile recall tasks."""
+"""Simulation-independent geometry and physical piano scoring."""
 from dataclasses import dataclass
 import math
 
@@ -24,40 +24,6 @@ def box_mesh(size, cells=(2, 2, 2)):
     return np.ascontiguousarray(points), tets
 
 
-def cue_mesh(kind):
-    """Equal envelopes, with one or two raised tactile ribs on both jaw faces."""
-    if kind not in (0, 1):
-        raise ValueError("cue kind must be 0 or 1")
-    points, tets = box_mesh((.030, .030, .050), (2, 2, 20))
-    z = points[:, 2]
-    centers = (.027,) if kind == 0 else (.021, .033)
-    relief = sum(.0015 * np.maximum(0., 1 - np.abs(z-c) / .004) for c in centers)
-    for axis in (0, 1):
-        points[:, axis] += np.sign(points[:, axis]) * relief
-    return points, tets
-
-
-@dataclass
-class CueMemory:
-    """The cue must be touched, then released before an answer can count."""
-    touch_steps: int = 12
-    gap_steps: int = 12
-    touched: int = 0
-    released: int = 0
-    acquired: bool = False
-
-    def advance(self, contact):
-        if not self.acquired:
-            self.touched = self.touched + 1 if contact else 0
-            self.acquired = self.touched >= self.touch_steps
-        if self.acquired:
-            self.released = 0 if contact else self.released + 1
-
-    @property
-    def ready(self):
-        return self.acquired and self.released >= self.gap_steps
-
-
 @dataclass(frozen=True)
 class Note:
     force_N: float
@@ -72,14 +38,14 @@ LONG_NOTE = Note(3.0, .60)
 
 class PianoScore:
     """Score physical key loads at every physics tick, including release."""
-    def __init__(self, cue_kind, dt=1/120, *, key_sequence=(0,1), key_count=2):
-        if cue_kind not in (0, 1) or not math.isfinite(dt) or dt <= 0:
-            raise ValueError("invalid piano cue or clock")
+    def __init__(self, dt=1/120, *, key_sequence=(0,1), key_count=2):
+        if not math.isfinite(dt) or dt <= 0:
+            raise ValueError("invalid piano clock")
         self.key_sequence = tuple(key_sequence)
         self.key_count = int(key_count)
         if not self.key_sequence or any(not 0 <= k < key_count for k in self.key_sequence):
             raise ValueError('invalid piano key sequence')
-        self.notes = tuple((SHORT_NOTE,LONG_NOTE)[(i+cue_kind)%2] for i in range(len(self.key_sequence)))
+        self.notes = tuple((SHORT_NOTE,LONG_NOTE)[i%2] for i in range(len(self.key_sequence)))
         self.dt = dt
         self.index = 0
         self.stable_steps = 0
@@ -93,7 +59,7 @@ class PianoScore:
     def success(self):
         return self.index == len(self.notes) and not self.failure
 
-    def advance(self, forces, *, memory_ready):
+    def advance(self, forces):
         values = np.asarray(forces, dtype=float)
         if values.shape != (self.key_count,) or not np.isfinite(values).all():
             self.failure = "invalid_key_force"
@@ -104,9 +70,6 @@ class PianoScore:
             self.failure = "key_overload"
             return
         if values.max() < .3 and not self.pressed:
-            return
-        if not memory_ready:
-            self.failure = "cue_not_remembered"
             return
         target = self.key_sequence[self.index]
         if np.any(np.delete(values,target) > .6):

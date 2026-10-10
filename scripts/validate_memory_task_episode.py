@@ -85,15 +85,16 @@ def validate_episode(path, expect=None):
                     and np.all(np.asarray(physical['bilateral_depth_mm']) < 28.)):
                 errors.append('object was not held clear of the rim')
         if accepted and task == 'play_piano':
-            physical = meta.get('memory_result', {})
+            physical = meta.get('piano_result', {})
             notes = physical.get('notes', [])
-            cue = meta.get('memory_ground_truth', {}).get('cue_kind')
-            if not physical.get('cue_acquired') or cue not in (0,1):
-                errors.append('tactile cue was not acquired')
+            if not physical.get('tool_grasped') or physical.get('articulation') != 'short_light_first_alternating':
+                errors.append('tool or fixed articulation missing')
+            if 'memory_ground_truth' in meta or 'cue_result' in meta:
+                errors.append('obsolete cue matching is still present')
             if [note['key']+21 for note in notes] != [64,62,60,62,64]:
                 errors.append('incomplete or incorrect melody')
-            for i, note in enumerate(notes if cue in (0,1) else []):
-                long = (i+cue)%2
+            for i, note in enumerate(notes):
+                long = i%2
                 if note['force_N'] != (3. if long else 1.5) or note['stable_seconds'] < (.6 if long else .2)-1e-9:
                     errors.append('incorrect force or duration')
     return dict(valid=not errors, task=task, seed=seed, outcome=meta['result'],

@@ -1,12 +1,11 @@
-"""Shared physical cue acquisition for the compact tactile memory tasks."""
+"""Shared geometry, observation and motion helpers for compact tactile tasks."""
 from pathlib import Path
-from itertools import product
 
 import numpy as np
 
 from ._base_task import BaseTask, BaseTaskCfg, Pose, UipcObjectCfg, configclass, torch
 from ._force_task_utils import tetra_faces, write_tet_asset
-from ._tactile_memory import CueMemory, box_mesh, cue_mesh
+from ._tactile_memory import box_mesh
 
 
 @configclass
@@ -27,12 +26,8 @@ class MemoryTaskCfg(BaseTaskCfg):
 
 
 class MemoryTask(BaseTask):
-    cue_position = (.38, -.12, .005)
-
     def __init__(self, cfg, **kwargs):
         self.failure = ""
-        self.cue_kind = 0
-        self.memory = CueMemory()
         self.monitor = False
         self.work = Path(cfg.save_dir).resolve() / "work" / "geometry"
         self.work.mkdir(parents=True, exist_ok=True)
@@ -65,36 +60,8 @@ class MemoryTask(BaseTask):
                 view(mesh.instances().find('is_fixed'))[:] = 1
         return actor
 
-    def create_cues(self):
-        self.cues = [self.add_mesh(f"cue_{i}", *cue_mesh(i),
-                     self.cue_position if i == 0 else (.38,-1.,.005), fixed=True)
-                     for i in range(2)]
-        self.cues[1].set_physics_mesh_visible(False)
-        # These are alternative versions of ONE reference. During reset they
-        # exchange the display and parking positions; they must pass each other.
-        contacts = self.uipc_sim.scene.contact_tabular()
-        variants = contacts.create('reference_variants')
-        contacts.insert(variants,variants,friction_rate=0.,
-            resistance=self.cfg.uipc_sim.contact.default_contact_resistance*1e9,enable=False)
-        for cue in self.cues:
-            for mesh in cue.uipc_meshes:
-                variants.apply_to(mesh)
-
-    def reset_cue(self):
-        self.monitor = False
-        self.failure = ""
-        self.memory = CueMemory()
-        self.cue_kind = int(self.rng.integers(2))
-        for i, cue in enumerate(self.cues):
-            cue.set_pose(Pose(self.cue_position if i == self.cue_kind else (.38,-1.,.005), [1.,0.,0.,0.]))
-            cue.set_physics_mesh_visible(i == self.cue_kind)
-        self.cue = self.cues[self.cue_kind]
-        self.metadata["memory_ground_truth"] = {"cue_kind":self.cue_kind,
-            "expert":"privileged scripted demonstrator; latent labels are absent from policy observations",
-            "cue":"one or two physical ribs, followed by release"}
 
     def pre_move(self):
-        # Cue acquisition belongs to POLICY, so training cannot trim the memory away.
         self.monitor = True
 
     def get_episode_context(self):
@@ -121,40 +88,12 @@ class MemoryTask(BaseTask):
         if self.policy_start_step is not None:
             obs['phase']['policy_step'] = self.step_count-self.policy_start_step
         obs["actor"] = {}
-        # Project a fixed world volume around the cue into BOTH cameras. This
-        # masks RGB and depth without removing the tactile deformation image.
-        for name, data in obs["observation"].items():
-            cam = self._camera_manager.cameras[name]
-            position = cam.data.pos_w[0].detach().cpu().numpy()
-            quat = cam.data.quat_w_ros[0].detach().cpu().numpy()
-            camera_to_world = Pose(position, quat).to_transformation_matrix()
-            corner_offsets = np.array(list(product((-.03,.03),(-.03,.03),(-.01,.07))))
-            corners = np.asarray(self.cue_position) + corner_offsets
-            local = (corners-position) @ camera_to_world[:3,:3]
-            if np.all(local[:,2] <= .001):
-                continue  # A cue entirely behind this camera cannot be seen.
-            if np.any(local[:,2] <= .001):
-                # Conservative at a near-plane crossing; never expose the cue.
-                data = {key: torch.zeros_like(value) for key,value in data.items()}
-            else:
-                intrinsic = cam.data.intrinsic_matrices[0].detach().cpu().numpy()
-                pixels = local @ intrinsic.T
-                pixels = pixels[:,:2] / pixels[:,2:]
-                data = {key: value.clone() for key,value in data.items()}
-                for value in data.values():
-                    h,w = value.shape[:2]
-                    lo = np.floor(pixels.min(axis=0)-6).astype(int)
-                    hi = np.ceil(pixels.max(axis=0)+6).astype(int)
-                    x0,x1 = np.clip([lo[0],hi[0]],0,w)
-                    y0,y1 = np.clip([lo[1],hi[1]],0,h)
-                    value[y0:y1,x0:x1] = 0
-            obs["observation"][name] = data
-        # Script tags must not reveal selected actors or the latent cue.
+        # Keep neutral action tags in the policy data.
         obs["atom"] = {"id": 0, "tag": "manipulate"}
         return obs
 
     def get_frame_shot(self, obs):
-        # Human review is sighted; policy RGB/depth remain masked in the data.
+        # Compose the available scene cameras and the two tactile views.
         from torchvision.transforms.functional import resize
         def tile(value, size):
             value = value.clone()
@@ -175,13 +114,6 @@ class MemoryTask(BaseTask):
         super()._step(is_save)
         if not self.monitor or self.step_count == before:
             return
-        center = self._robot_manager.get_gripper_center_pose().p
-        near = np.linalg.norm(center-(np.asarray(self.cue_position)+[0,0,.027])) < .022
-        contact = False
-        if near:
-            depths = self._tactile_manager.get_min_depth().detach().cpu().numpy()
-            contact = bool(np.all(np.isfinite(depths)) and np.all(depths < 28.1))
-        self.memory.advance(contact)
         if self.policy_start_step is not None:
             if (self.step_count-self.policy_start_step)*self.cfg.sim.dt > self.cfg.memory_timeout_seconds:
                 self.failure = self.failure or "timeout"
@@ -209,22 +141,6 @@ class MemoryTask(BaseTask):
                 return False
         return True
 
-    def touch_cue(self):
-        position = np.asarray(self.cue_position)+[0,0,.027]
-        self.move(self.atom.open_gripper(.7), tag="manipulate", delay=False)
-        self.move_center(position+[0,0,.055])
-        self.move_center(position)
-        self.move(self.atom.close_gripper(0., depth_threshold=27.8), tag="manipulate", delay=False)
-        self.delay(16, is_save=True)
-        self.move(self.atom.open_gripper(.7), tag="manipulate", delay=False)
-        self.move_center(position+[0,0,.060])
-        self.delay(12, is_save=True)
-        if not self.memory.ready:
-            self.failure = "cue_contact_missing"
-        self.metadata['cue_result'] = dict(acquired=self.memory.acquired,
-            released_steps=self.memory.released,failure=self.failure,
-            actual_pose=self.cue.get_pose().p.tolist())
-        return self.plan_success and not self.failure
 
     def servo_center(self, position):
         manager = self._robot_manager
