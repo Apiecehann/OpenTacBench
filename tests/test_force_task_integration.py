@@ -35,6 +35,42 @@ BASE_ACTION = method("envs/_base_task.py", "BaseTask", "take_action")
 BASE_ENV_STEP = method("envs/_base_task.py", "BaseTask", "env_step")
 
 
+# LOCAL DEVIATION from upstream (2026-10-09): the bulb bar is the seat, not
+# the torque, so this file's own test follows `Task.check_success` as it
+# stands here -- turns in [1,3], the whole travel less 2 mm, pressed on the
+# seat, nothing tilted, drifting or failed.  Upstream's version of this test
+# asserted the 1.5-turn floor and the torque hold that left with the criteria.
+def _bulb_task(**overrides):
+    state = dict(_accepted_result=None, controller='diagnostic_force', failure=None,
+        plan_success=True, thread_spec=NS(handedness=1, nominal_free_travel_m=.013),
+        measured=dict(formal_net_turns=2.8, formal_advance_m=.012,
+            phase_error_m=.0001, center_drift_m=0., tilt_deg=0., seat_force_N=4.))
+    state.update(overrides)
+    return NS(**state)
+
+
+@pytest.mark.parametrize('field,value,accepted',[
+    ('formal_net_turns',.99,False),  ('formal_net_turns',1.,True),
+    ('formal_net_turns',1.49,True),  ('formal_net_turns',3.,True),
+    ('formal_net_turns',3.01,False), ('formal_net_turns',-1.2,False),
+    ('formal_advance_m',.010,False), ('formal_advance_m',.012,True),
+    ('seat_force_N',3.,False),       ('seat_force_N',3.5,True),
+    ('tilt_deg',6.,False),           ('center_drift_m',.002,False),
+    ('phase_error_m',.002,False)])
+def test_bulb_bar_is_the_seat(field,value,accepted):
+    score = method('envs/bulb_tightening.py','Task','check_success')
+    task = _bulb_task()
+    task.measured[field] = value
+    assert score(task) is accepted
+
+
+def test_bulb_bar_rejects_failure_plan_and_diagnostic_controllers():
+    score = method('envs/bulb_tightening.py','Task','check_success')
+    assert score(_bulb_task(failure='ik_refused')) is False
+    assert score(_bulb_task(plan_success=False)) is False
+    assert score(_bulb_task(controller='diagnostic_crush')) is False
+
+
 class Robot:
     gripper_max_qpos = .039
 

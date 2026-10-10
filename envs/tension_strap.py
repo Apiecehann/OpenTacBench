@@ -464,6 +464,8 @@ def strap_mesh():
 class Task(BaseTask):
     def __init__(self, cfg, **kwargs):
         self.params = task_parameters(cfg)
+        from ._force_task_utils import motion_speed_scale
+        self.motion_speed_scale = motion_speed_scale(self.params)
         self.params.setdefault('public_tactile_grasp',True)
         self.params.setdefault('controller_deadband_N',.02)
         if self.params.get('mesh_path'):
@@ -814,7 +816,8 @@ class Task(BaseTask):
         from ._force_task_utils import execute_joint_target
         target_depth=float(self.params.get('grasp_depth_mm',27.6))
         record=dict(depth_target_mm=target_depth,action_repeat=2,
-                    minimum_step_m=5e-6,maximum_step_m=1e-4,
+                    minimum_step_m=5e-6,maximum_step_m=1e-4*self.motion_speed_scale,
+                    contact_maximum_step_m=1e-4,
                     inputs='bilateral raw tactile depth and current jaw position',
                     samples=[],stop_reason='budget')
         self.metadata['public_grasp_control']=record
@@ -825,7 +828,9 @@ class Task(BaseTask):
             depths=self._tactile_manager.get_min_depth().detach().cpu().numpy().reshape(-1)
             current=float(self._robot_manager.get_gripper_qpos())
             try:
-                target=next_grip_qpos(depths,current,target_depth_mm=target_depth)
+                speed=1.+(self.motion_speed_scale-1.)*float(np.clip((np.min(depths)-28.5)/3.,0.,1.))
+                target=next_grip_qpos(depths,current,target_depth_mm=target_depth,
+                                      maximum_step_m=1e-4*speed)
             except ValueError as error:
                 record['stop_reason']='invalid_tactile'
                 record['error']=str(error)
@@ -853,7 +858,7 @@ class Task(BaseTask):
         for dz,tag in [(.05,'above_strap'),(0.,'approach_strap')]:
             target = Pose(center+[0.,0.,dz],q)
             self.move(self.atom.move_to_pose(self._robot_manager.gripper_center_to_ee(target)),
-                      tag=tag, time_dilation_factor=.5, delay=False)
+                      tag=tag, time_dilation_factor=min(1.,.5*self.motion_speed_scale), delay=False)
             if not self.plan_success:
                 return
         if self.params.get('public_tactile_grasp',True):
@@ -939,7 +944,11 @@ class Task(BaseTask):
                 alpha=1.-np.exp(-control_dt/.15)
                 filtered=float(sensed) if filtered is None else filtered+alpha*(float(sensed)-filtered)
                 error=self.target-filtered
-                velocity=float(np.clip(error/float(self.params.get('force_gain_Ns_per_m',2000.)),-.002,.002))
+                # Follow the same vertical path faster far from the force target.
+                # Taper to the original controller within 1 N to retain its stable
+                # contact/hold behavior and the independent physical acceptance.
+                speed=1.+(self.motion_speed_scale-1.)*float(np.clip((abs(error)-1.)/2.,0.,1.))
+                velocity=float(np.clip(error/float(self.params.get('force_gain_Ns_per_m',2000.)),-.002,.002))*speed
                 if abs(error)<controller_deadband:velocity=0.0
                 image_hold_seconds=image_hold_seconds+control_dt if abs(error)<.20 else 0.0
                 self.phase=('hold' if abs(error)<.20 else ('pull' if velocity>0 else 'relax'))+f'_{self.target:g}N'
