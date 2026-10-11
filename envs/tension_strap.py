@@ -478,7 +478,6 @@ class Task(BaseTask):
         self.ruptured = False
         self._monitor_strap=False;self._expert_active=False;self._grip_released=False
         self._accepted_result=None
-        self._submission_requested=False;self._submission_anchor=None;self._submission_hold_steps=0
         self.active = False
         self.trace = []
         self.measured = {}
@@ -583,7 +582,6 @@ class Task(BaseTask):
         self._monitor_strap=False
         result=super().reset(*args,**kwargs)
         self._grip_released=False;self._accepted_result=None
-        self._submission_requested=False;self._submission_anchor=None;self._submission_hold_steps=0
         self._stage_scorer=StrapLifecycle(self.policy_start_step)
         self._measure_step=-1
         self._monitor_strap=True
@@ -628,7 +626,6 @@ class Task(BaseTask):
             damage=self.failure or '')
         if self._stage_scorer.failure and self.failure is None:
             self.failure=self._stage_scorer.failure
-        self._submission_requested=self._stage_scorer.success
         self.metadata['strap_acceptance']=self._stage_scorer.snapshot()
         self.held_steps=int(round(self.metadata['strap_acceptance']['current_continuous_hold_seconds']/self.cfg.sim.dt))
         if self.failure and self._expert_active:
@@ -637,18 +634,20 @@ class Task(BaseTask):
     def check_early_stop(self):
         return self.failure is not None
 
-    def take_action(self,*args,**kwargs):
-        if self._accepted_result is not None:
-            return bool(self._accepted_result),bool(self._accepted_result)
-        executed,success=super().take_action(*args,**kwargs)
-        if success or self.failure:
-            self._finish_strap_episode()
-            return bool(executed and not self.failure),bool(self._accepted_result)
-        return executed,success
+    def finish_episode(self):
+        """Accept an explicit policy END; ordinary joint actions never submit."""
+        if self.phase_id == self.PHASE_TERMINAL:
+            return bool(self.eval_success)
+        if self.phase_id != self.PHASE_POLICY:
+            raise RuntimeError('finish_episode() requires the POLICY handoff')
+        self._finish_strap_episode()
+        self._save_metadata()
+        return self.eval_success
 
     def _finish_strap_episode(self):
         if self._accepted_result is not None:return
         self._accepted_result=bool(self.check_success())
+        self.eval_success=self._accepted_result
         if not self._accepted_result and self.failure is None:
             self.failure='incomplete_two_stage_sequence'
         self._monitor_strap=False;self.active=False
@@ -668,9 +667,10 @@ class Task(BaseTask):
         self.metadata['strap_trace_path']=str(self.work/'trace.jsonl')
         self.metadata['diagnostic_only']=self.controller!='marker_rgb' or bool(self.params.get('overload_demo')) or bool(self.params.get('strap_review_scenario'))
         self.metadata['success_scoring']='independent physical 12 N then 18 N, each within 0.5 N continuously 3 s; total 60 s'
-        from ._force_task_utils import record_terminal_observation
-        record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
-        if self.ruptured and self.plan_success:
+        if self.cfg.save_frequency > 0 and self.mode == 'collect':
+            from ._force_task_utils import record_terminal_observation
+            record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
+        if self.ruptured and self.plan_success and self.mode == 'collect':
             self.phase='rupture'
             for tick in range(180):
                 self._step(is_save=True)
@@ -808,7 +808,7 @@ class Task(BaseTask):
         finally:
             self._expert_active=False
         if self.controller!='diagnostic_ladder':
-            self._finish_strap_episode()
+            self.finish_episode()
 
     def _close_strap_public(self):
         """Use the same two-tick qpos path recorded for public replay."""
@@ -1024,6 +1024,7 @@ class Task(BaseTask):
 
 @configclass
 class TaskCfg(BaseTaskCfg):
+    policy_controls_termination = True
     step_lim = 4000
     max_save_frames = 2000
     video_size = (1120, 320)

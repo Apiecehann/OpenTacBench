@@ -50,6 +50,34 @@ class Policy(BasePolicy):
 
 **3. Run evaluation:**
 
+For `play_piano`, `blind_pick`, `tension_strap`, and `bulb_tightening`, the
+policy decides when to stop. Joint commands keep executing after physical
+success; holding a stationary command is not an END signal. In your policy's
+`eval()` method, submit its predicted END explicitly:
+
+```python
+if predicted_stop:  # Your policy's decision, not task.check_success().
+    success = task.finish_episode()
+    return
+task.take_action(action, action_type='qpos')
+```
+
+`finish_episode()` evaluates the current state, freezes the verdict, sets the
+terminal phase and `eval_success`, and returns a boolean. Repeated END calls
+return the same result. Failed END submissions are exposed by
+`check_early_stop()`, so the evaluation loop exits on either verdict. The method
+is valid only after the POLICY handoff. After END, `take_action()` returns
+`(False, verdict)` without moving; `env_step()` rejects further steps.
+
+An external CapX runner that already owns episode termination can instead stop
+sending actions and then call `check_success()` for the physical verdict.
+`check_success()` is a read-only query: it does not submit END or latch success.
+The repository's evaluation loop requires `finish_episode()` to recognize END;
+reaching its action limit without END counts as failure. Existing damage and
+timeout stops remain in effect. Other tasks retain their previous termination
+behavior. The joint action shape and 120 Hz physics / 60 Hz policy cadence are
+unchanged.
+
 ```bash
 bash eval_policy.sh ${task_name} ${task_config} ${policy_name}/${policy_config_name} ${gpu_id}
 # Example: bash eval_policy.sh lift_bottle demo YourPolicy/deploy 0

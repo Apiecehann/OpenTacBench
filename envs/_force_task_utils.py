@@ -840,6 +840,9 @@ def take_force_task_action(task, action, *, action_type="qpos", force=True,
     repeat = task.cfg.policy_action_repeat if action_repeat is None else action_repeat
     if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
         raise ValueError("action_repeat must be a positive integer")
+    policy_end = getattr(task.cfg, "policy_controls_termination", False)
+    if policy_end and task.phase_id == task.PHASE_TERMINAL:
+        return False, task.eval_success
     if task.take_action_cnt >= task.cfg.step_lim or task.eval_success:
         return True, task.eval_success
     target = torch.as_tensor(action, dtype=torch.float32, device=task.device).reshape(-1)
@@ -858,7 +861,9 @@ def take_force_task_action(task, action, *, action_type="qpos", force=True,
             manager.set_arm(command[:-1], vel=joint_velocity, force=force)
             manager.set_gripper(command[-1], force=force)
             task._step()
-            if task.check_success():
+            # These tasks are scored when the policy submits END. Physical
+            # success must neither latch eval_success nor shorten an action.
+            if not policy_end and task.check_success():
                 task.eval_success = True
             if task.eval_success or task.check_early_stop() or not task.plan_success:
                 break
@@ -1157,6 +1162,10 @@ def run_force_task_episode(task, *, seed, policy=None, instructions=None,
             task._set_phase(task.PHASE_TERMINAL,
                             terminal_reason=task.metadata["success_diagnostics"]["terminal_reason"])
         success = bool(task.plan_success and task.check_success() and not task.check_early_stop())
+        if policy is not None and getattr(task.cfg, "policy_controls_termination", False):
+            # Running out of the action budget is not a policy END, even if
+            # the object briefly passed through a successful state.
+            success = bool(success and task.eval_success and task.phase_id == task.PHASE_TERMINAL)
         row["result"] = "success" if success else "fail"
         row["terminal_reason"] = task.terminal_reason or ("success" if success else "incomplete")
         if policy is None and success:
