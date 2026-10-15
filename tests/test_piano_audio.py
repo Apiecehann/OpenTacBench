@@ -47,3 +47,13 @@ def test_end_while_held_and_duplicate_boundary_frame():
 def test_empty_keyboard_is_silent():
     samples,mapped = synthesize([],range(0,120,2))
     assert not np.any(samples) and not mapped
+
+
+def test_thirty_hz_video_preserves_the_physics_clock():
+    steps=np.arange(0,720,8)  # 240 Hz physics, 30 Hz recording, three seconds.
+    events=[dict(midi=60,start_step=240,end_step=480,peak_force_N=1.)]
+    samples,mapped=synthesize(events,steps,fps=30.)
+    assert len(samples)==3*48000
+    assert mapped[0]['onset_seconds']==pytest.approx(1.)
+    assert mapped[0]['release_seconds']==pytest.approx(2.)
+    assert not np.any(samples[:48000]) and np.any(samples[48000:96000])

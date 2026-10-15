@@ -19,6 +19,8 @@ class IndexTactile:
 
     def __init__(self,task):
         self.task=task
+        width=task.cfg.tactile_image_width
+        self.image_shape=(width*3//4,width)
         self.dt=task.cfg.physics_dt
         self.key_forces=np.zeros((88,3))
         self.peak_indentation=0.
@@ -29,7 +31,7 @@ class IndexTactile:
         self._mount_mini()
         cfg=create_gelsight_mini_cfg('/World/Hand/GelSightMini',
             '/World/IndexGel','GelSightMini',name='index',
-            resolution=(640,480),data_type=['tactile_rgb','marker_rgb','marker_motion'])
+            resolution=(width,width*3//4),data_type=['tactile_rgb','marker_rgb','marker_motion'])
         self.sensor=VisualTactileSensor('index',cfg,task.hand,None,self.uipc)
         self.scene=self.uipc.scene
         contacts=self.scene.contact_tabular()

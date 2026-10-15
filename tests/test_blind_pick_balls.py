@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from env.tasks._blind_ball_models import (
     MATERIALS,CLASSES,FLOOR_Z,BOWL_CENTER,PickScore,
-    ball_mesh,sample_scene,surface_roughness,classify_touch,
+    ball_mesh,sample_scene,surface_roughness,classify_touch,sphere_center_xy,
 )
 
 
@@ -24,19 +24,20 @@ def test_catalogue_varies_real_stiffness_and_surface_geometry():
         assert (counts<=2).all()
 
 
-@pytest.mark.parametrize('count',[2,3])
+@pytest.mark.parametrize('count',range(2,10))
 @pytest.mark.parametrize('target',CLASSES)
 def test_random_layout_has_target_and_clearance(count,target):
     samples=[]
     for seed in range(30):
         materials,p=sample_scene(np.random.default_rng(seed),count,target)
         assert target in {m.kind for m in materials}
-        assert len({m.kind for m in materials})==count
+        assert len({m.kind for m in materials})==min(count,3)
+        if count==6: assert len({m.name for m in materials})==6
         assert p.shape==(count,3)
         distances=np.linalg.norm(p[:,None,:2]-p[None,:,:2],axis=-1)+np.eye(count)
         assert distances.min()>.078
-        assert (p[:,0]>.44).all() and (p[:,0]<.58).all()
-        assert (np.abs(p[:,1])<.13).all()
+        assert (p[:,0]>.42).all() and (p[:,0]<.64).all()
+        assert (np.abs(p[:,1])<.17).all()
         samples.append(p[0,:2])
     assert len(np.unique(samples,axis=0))==30
 
@@ -50,6 +51,15 @@ def test_probe_features_distinguish_smooth_soft_and_real_relief():
     assert classify_touch(.0001,surface_roughness(smooth))=='hard'
     assert classify_touch(.002,surface_roughness(smooth))=='soft'
     assert classify_touch(.0001,surface_roughness(rough))=='textured'
+
+
+def test_ball_center_estimate_handles_top_and_side_contacts():
+    center=np.array([.52,-.08,.04])
+    for normal in ([0.,0.,1.],[.1,0.,1.],[1.,2.,3.],[-1.,0.,0.],[0.,-1.,0.]):
+        normal=np.asarray(normal); normal=normal/np.linalg.norm(normal)
+        point=center+.024*normal
+        for load in (.08,.5,3.):
+            np.testing.assert_allclose(sphere_center_xy(point,load*normal),center[:2],atol=1e-12)
 
 
 def test_scoring_requires_correct_ball_verified_lift_and_release():

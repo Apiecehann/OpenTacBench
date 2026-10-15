@@ -7,7 +7,7 @@ from isaaclab.app import AppLauncher
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--balls',type=int,choices=(2,3),default=3)
+    parser.add_argument('--balls',type=int,choices=range(2,10),default=6)
     parser.add_argument('--target',choices=('hard','soft','textured'),default='textured')
     parser.add_argument('--seed',type=int,default=0)
     parser.add_argument('--video',action='store_true')

@@ -30,10 +30,13 @@ class TaskCfg(PianoCfg):
     melody: tuple = TWINKLE
     tactile: bool = False
     tactile_workspace: str = '.cache/piano_tactile/world'
+    tactile_image_width: int = 640
     tactile_action_rates: tuple = (1., .375, 8.)  # Y m/s, Z m/s, index rad/s
     tactile_command_filter_seconds: float = .04
 
     def __post_init__(self):
+        if self.tactile_image_width not in (320,640):
+            raise ValueError('GelSight Mini image width must be 320 or 640')
         if self.tactile:
             rates=np.asarray(self.tactile_action_rates,dtype=float)
             if (rates.shape!=(3,) or not np.isfinite(rates).all() or (rates<=0).any()
@@ -87,7 +90,7 @@ class Task(PianoTask):
                 joint.GetLowerLimitAttr().Set(-6.)
                 joint.GetUpperLimitAttr().Set(2.)
 
-    def _create_hand(self):
+    def _hand_cfg(self):
         cfg = SHADOW_HAND_CFG.replace(prim_path='/World/Hand')
         if self.cfg.hand_usd:
             cfg.spawn.usd_path = self.cfg.hand_usd
@@ -101,7 +104,10 @@ class Task(PianoTask):
         cfg.actuators = {
             'finger':ImplicitActuatorCfg(joint_names_expr=['robot0_FFJ2'],stiffness=4.,damping=.15,effort_limit_sim=.9),
             'slides':ImplicitActuatorCfg(joint_names_expr=['rail_.*'],stiffness=20000.,damping=250.,effort_limit_sim=300.)}
-        self.hand = Articulation(cfg)
+        return cfg
+
+    def _create_hand(self):
+        self.hand = Articulation(self._hand_cfg())
         for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand')):
             if prim.IsInstance():
                 prim.SetInstanceable(False)
@@ -129,6 +135,15 @@ class Task(PianoTask):
                     joint=UsdPhysics.RevoluteJoint(prim)
                     joint.GetLowerLimitAttr().Set(0.)
                     joint.GetUpperLimitAttr().Set(math.degrees(.65))
+        self._mount_wrist()
+        self._finish_hand()
+        if self.cfg.tactile:
+            # UIPC gel supplies index contact; avoid duplicate rigid contact.
+            for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand/robot0_ffdistal')):
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+
+    def _mount_wrist(self):
         root=self.stage.GetPrimAtPath('/World/Hand')
         rigid=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True)
         for name in ('RailBase','YCarriage','ZCarriage'):
@@ -178,13 +193,6 @@ class Task(PianoTask):
             sim_utils.CollisionPropertiesCfg(contact_offset=.0005,rest_offset=0.))
         UsdGeom.Imageable(self.stage.GetPrimAtPath('/World/PalmStand')).MakeInvisible()
         self._box('/World/WristRail',(-.011,0.,.040),(.09,.36,.08),(.035,.045,.060))
-        self._finish_hand()
-        if self.cfg.tactile:
-            # UIPC gel supplies index contact; remove the original rigid pad's
-            # duplicate collision with the keys.
-            for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand/robot0_ffdistal')):
-                if prim.HasAPI(UsdPhysics.CollisionAPI):
-                    UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
 
     def _finish_hand(self):
         from envs._force_task_utils import _material
@@ -195,6 +203,7 @@ class Task(PianoTask):
             'base':_material(self.stage,'/World/Hand/Looks/Base',(.025,.035,.050),.32,.55)}
         for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand')):
             path=str(prim.GetPath()).lower()
+            if path.startswith('/world/hand/arm/'): continue
             if prim.IsA(UsdGeom.Mesh) and 'collisions' not in path:
                 kind=('base' if 'forearm' in path or 'mount' in path
                       else 'pad' if 'distal' in path else 'shell' if 'palm' in path else 'metal')
@@ -222,7 +231,7 @@ class Task(PianoTask):
         result=super().reset(**kwargs)
         self._demo_note=0
         self._demo_start=0.
-        self._demo_y_start=float(self.hand.data.joint_pos[0,self._y])
+        self._demo_y_start=float(self._wrist_state()[0])
         self.max_palm_rotation=0.
         if self.tactile is not None:
             self.tactile.sensor.reset_reference()
@@ -264,24 +273,31 @@ class Task(PianoTask):
             self.tactile.close()
         super().close()
 
-    def _action_target(self, action):
+    def _filter_action(self, action):
         a=np.asarray(action,dtype=float)
         if a.shape!=(3,) or not np.isfinite(a).all():
-            raise ValueError('Action must contain finite rail Y (m), lift Z (m), and index flexion (rad)')
+            raise ValueError('Action must contain finite wrist Y (m), lift Z (m), and index flexion (rad)')
         a=np.clip(a,self.action_space.low,self.action_space.high)
         if self.cfg.tactile:
             # Position targets can otherwise command an impulsive lift/flex
             # combination that collapses a millimetre-scale soft gel.
             previous=(self._last_action if self._last_action is not None else
-                self.hand.data.joint_pos[0,[self._y,self._z,self._index]].cpu().numpy())
+                self._wrist_state())
             alpha=1-math.exp(-self.cfg.physics_dt*self.cfg.action_repeat/self.cfg.tactile_command_filter_seconds)
             a=previous+alpha*(a-previous)
             delta=np.asarray(self.cfg.tactile_action_rates)*self.cfg.physics_dt*self.cfg.action_repeat
             a=np.clip(a,previous-delta,previous+delta)
             self._last_action=a.copy()
+        return a
+
+    def _action_target(self, action):
+        a=self._filter_action(action)
         q=self._rest.clone()
         q[0,[self._y,self._z,self._index]]=torch.as_tensor(a,dtype=q.dtype,device=q.device)
         return q
+
+    def _wrist_state(self):
+        return self.hand.data.joint_pos[0,[self._y,self._z,self._index]].cpu().numpy()
 
     def _check_hand_motion(self):
         palm=self.hand.data.body_pos_w[:,self._palm]
@@ -326,7 +342,7 @@ class Task(PianoTask):
                 return np.array([self.layout[self.cfg.melody[old_note]-21].position[1]-.033,.03,0.])
             self._demo_note=self.score.count
             self._demo_start=now
-            self._demo_y_start=float(self.hand.data.joint_pos[0,self._y])
+            self._demo_y_start=float(self._wrist_state()[0])
         elapsed=now-self._demo_start
         y=self.layout[self.score.active_key].position[1]-.033
         def smooth(value):

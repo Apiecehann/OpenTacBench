@@ -1,10 +1,12 @@
 # Single-finger piano: Shadow Hand and Twinkle Twinkle Little Star
 
-The default task is `shadow_piano.Task`: a five-finger Shadow Hand plays the
-complete 42-note melody of **Twinkle Twinkle Little Star**, in C major. Only the
-index finger flexes. All other finger and wrist joints are welded; two driven
-prismatic joints lift and translate the hand between keys. The hand follows
-continuous PhysX motion. The task never teleports the root to the next key.
+The default task is `arm_shadow_piano.Task`: a Franka Panda carries a five-finger
+Shadow Hand and plays the complete 42-note melody of **Twinkle Twinkle Little
+Star**, in C major. Only the
+index finger flexes. All other hand joints are welded; seven driven Panda
+joints lift and translate the wrist through Isaac Lab's differential IK
+controller. The hand follows continuous PhysX motion. The task never teleports
+the root to the next key.
 
 Run from the repository root in the Isaac Lab Python environment:
 
@@ -15,17 +17,32 @@ python -m env.tasks.run_single_finger_piano --headless --video
 Use the standalone Isaac Sim installation's `python.sh` in place of `python`
 when appropriate. The implementation targets Isaac Sim 5.1 / Isaac Lab 2.3.2.
 Omit `--headless` to open the viewer. The default outputs are
-`data/shadow_piano/video.mp4`, `video.wav` and `result.json`.
-`--notes 3 --output data/shadow_piano/smoke` plays only C4 C4 G4 for a smoke run;
+`data/arm_shadow_piano/video.mp4`, `video.wav` and `result.json`.
+`--notes 3 --output data/arm_shadow_piano/smoke` plays only C4 C4 G4 for a smoke run;
 omit `--notes` for the entire song.
+`--wrist rail` selects the previous standalone Shadow Hand on Y/Z slides.
 
-The Shadow task's Gymnasium action is `(rail_y_m, lift_z_m, index_flexion_rad)`.
-Observations contain the three joint positions and velocities, all 88 key
+The Shadow task's Gymnasium action is `(wrist_y_m, lift_z_m, index_flexion_rad)`.
+The arm variant has 111 state values, including all seven arm joint positions
+and velocities. The rail variant retains its 97 values. Both include wrist/finger
+positions and velocities, all 88 key
 angles, completed-note fraction, press/release state and next pitch. Each note
 must physically depress its key with measured contact force and then release
 it. Wrong keys fail the episode; repeated pitches require separate releases.
 Phrase-ending notes require longer holds. Sound comes from measured key
 contacts and uses the shared piano synthesizer; no melody audio is prerecorded.
+The hand connects to `panda_link7` by a fixed joint at the Panda flange. Initial
+arm geometry and joint angles agree through Isaac Sim's Lula solver. Playing
+uses motor targets; only reset writes joint state directly. Either support
+uses the same original index GelSight Mini.
+The arm demo waits for the wrist to settle before bending the index, verifies
+each physical press, releases the finger, then lifts and moves to the next key.
+The index motor uses 6 N m/rad stiffness, 0.20 N m s/rad damping and the existing
+0.9 N m effort limit, with the original 0.50 rad tactile command. Sensor dimensions, optics, calibration and
+musical scoring remain shared. IK increments are scaled together to preserve
+their Cartesian direction when motor rates are limited.
+A wrist trim bounded to 1.5 mm uses measured key travel to maintain the same
+press criterion across arm poses; it never changes the scoring thresholds.
 
 The hand uses a dark forearm, satin metal finger links, a pale palm shell and
 dark fingertip pads. Its articulated/collision geometry comes from Isaac Lab's
@@ -50,6 +67,10 @@ From the repository root:
 ```bash
 bash scripts/install_piano_tactile.sh
 bash scripts/run_piano_tactile.sh --headless --video
+# Use the original factory's standard 320 x 240 full-field resolution:
+bash scripts/run_piano_tactile.sh --headless --video --image-width 320
+# Validated faster rendering profile, with the same physics and sensor API:
+bash scripts/run_piano_tactile.sh --headless --rendering_mode performance --video --image-width 320
 ```
 
 `ISAAC_SIM_ROOT` selects the standalone Isaac installation (default `/isaac-sim`).
@@ -62,7 +83,9 @@ For restricted networks, optional `PIANO_GITHUB_BASE` and
 `PIANO_GITHUB_DOWNLOAD_PREFIX` select Git and archive transports respectively;
 archive checksums remain enforced.
 
-The tactile task keeps 240 Hz physics and 60 Hz control/recording. The backing
+Both piano supports keep 240 Hz physics. The arm uses 30 Hz control/recording;
+the rail retains 60 Hz. Audio and RGB recording use the corresponding frame
+clock, without changing playback speed. The backing
 follows the index distal link. Gel and reachable piano keys are solved together
 in UIPC, using affine rigid keys, rear revolute hinges, 1 N m/rad return springs,
 0.025 N m s/rad damping and mechanical travel stops. The visible Isaac keyboard
@@ -102,10 +125,12 @@ enabled. `state` retains the usual 97 values. The index dictionary contains:
 The complete original camera frame is returned without cropping or overlays.
 Surface depth and displacement remain internal to the FEM
 and optical simulation; tactile observations and recordings expose only RGB.
-The default output directory is `data/shadow_piano_calibrated`: `tactile.h5`
+The default arm output directory is `data/arm_shadow_piano`; the rail tactile
+variant uses `data/shadow_piano_calibrated`. In each, `tactile.h5`
 stores synchronized timestamps, state and `tactile/index/rgb`; `--video`
 records `video.mp4` with the scene, complete RGB image and contact audio, plus
-`gelsight.mp4` with just the untouched 640 × 480 tactile frames (silent).
+`gelsight.mp4` with just the untouched tactile frames at the selected resolution
+(640 × 480 by default, silent).
 The composite title sits outside the image, fixing the earlier title bar
 that covered the top 27 rows of the displayed RGB. No depth or deformation
 panels are included. The original non-tactile command retains its flat
@@ -118,7 +143,15 @@ rejection and the index observation contract:
 PYTHONEXE="$PWD/.venv-tactile/bin/python" /isaac-sim/python.sh scripts/check_piano_tactile.py
 ```
 
-The original-API implementation passed all 42 press/release cycles and produced
+The arm implementation passed all 42 physical press/release cycles with 42
+matching contact-driven audio notes in the headless performance profile at
+320 × 240. It recorded 3742 synchronized frames over 124.73 simulated seconds
+in `data/arm_shadow_piano/full`. The H5 contains 111 state values and only
+`tactile/index/rgb`. All seven arm joints moved, inactive hand bodies remained
+within 0.2 micrometres in palm coordinates, and the largest wrist trim was
+0.50 mm. This is one complete reference demonstration, not a success-rate study.
+
+The earlier original-API rail implementation passed all 42 press/release cycles and produced
 42 contact-driven audio notes, with 3472 synchronized RGB/video frames over
 57.86 simulated seconds. The controls verify idle, sustained hold, release,
 physical reset and wrong-key rejection. Unmarked optical RGB changes under
@@ -178,11 +211,17 @@ described above, with a Franka Panda and two GelSight Mini pads.
 
 ```bash
 bash scripts/run_blind_pick_balls.sh --headless --video
+# Reference six-ball demonstration with faster rendering:
+bash scripts/run_blind_pick_balls.sh --headless --rendering_mode performance --image-width 320 --video
+# Increase clutter to nine balls:
+bash scripts/run_blind_pick_balls.sh --headless --video --balls 9
 # Two balls, another target category and another random layout:
 bash scripts/run_blind_pick_balls.sh --headless --video --balls 2 --target soft --seed 3
 ```
 
-The default scene contains three balls, one from each category. The catalogue
+The default scene contains six balls, two per category, using all six profiles.
+`--balls 2` through `--balls 9` select the count, with balanced categories and
+randomized, non-overlapping positions. The catalogue
 has six synthetic material profiles:
 
 | Category | Profiles | Physical difference |
@@ -199,11 +238,19 @@ state values, the three-way target category and `tactile/left/rgb` and
 `tactile/right/rgb`. No scene camera, object pose, material label or seed is
 returned to the policy. The observer camera is used only for video.
 
+Both standalone tasks and the other benchmark tasks import their background
+and table defaults from `envs/_scene.py`: `assets/scene/base5.exr`,
+`plate01.usda` and its original `texture01` material. The piano table is scaled
+to support its wider keyboard and arm. Sparse checkouts must include these
+scene assets and `gridroom_curved.usd` before launch.
+
 The action is `(tcp_x_m, tcp_y_m, tcp_z_m, jaw_position_m)`. The scripted
 demonstrator searches the known workspace, localizes through its own pad
 contacts and probes incremental squeeze compliance and fine contact relief.
 It then lifts the selected ball clear of the rim and releases it into the
-bowl. Scoring independently checks the actual ball's category, a sustained
+bowl. The two tactile contact centroids compensate for an off-center grasp
+when choosing the drop position, without reading the ball pose. Scoring
+independently checks the actual ball's category, a sustained
 bilateral lift and a released ball inside the bowl; a wrong material fails.
 
 PhysX drives the arm; UIPC solves the pads, balls and container together.
@@ -231,7 +278,17 @@ outside the images. Ground-truth labels and positions in `result.json` are
 private diagnostics for validating episodes, separate from observations.
 `--control idle --idle-frames 120` checks the no-action counterfactual.
 
-The default three-ball, seed-0 textured-target demo completed the blind search,
+The default six-ball, seed-0 textured-target demonstration passed in the
+headless performance profile at 320 × 240: blind search, tactile classification,
+verified lift and released placement completed in 64.45 simulated seconds
+(3867 frames). The raised-rib ball settled 0.41 mm from the bowl centre, and
+the other five balls remained in the box. Its recording and diagnostics are
+in `data/blind_pick_balls/six_balls_demo`. A six-ball idle run also preserved
+the original 640 × 480 observation contract and scored zero. Layout sampling
+tests cover counts 2–9; these demonstrations do not establish retrieval
+success across every count, layout and material profile.
+
+The earlier three-ball, seed-0 textured-target demo completed the blind search,
 verified lift and released placement in 45.47 simulated seconds (2728 video
 frames). The rubber and polymer distractors remained inside the box. Its
 recording and diagnostics are in `data/blind_pick_balls/original_api_demo`.

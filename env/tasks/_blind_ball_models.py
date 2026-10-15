@@ -86,30 +86,42 @@ def ball_mesh(material,subdivisions=3):
     return np.ascontiguousarray(points),tets
 
 
-def sample_scene(rng,count=3,target='textured'):
-    if count not in (2,3) or target not in CLASSES:
-        raise ValueError('Use 2 or 3 balls and a known target class')
+def sample_scene(rng,count=6,target='textured'):
+    if count not in range(2,10) or target not in CLASSES:
+        raise ValueError('Use 2 to 9 balls and a known target class')
     others=[name for name in CLASSES if name!=target]
-    kinds=[target,*list(rng.choice(others,count-1,replace=False))]
+    kinds=([target,*list(rng.choice(others,count-1,replace=False))] if count<=3
+        else list(CLASSES)*(count//3)+list(rng.choice(CLASSES,count%3,replace=False)))
     rng.shuffle(kinds)
-    materials=[MATERIALS[int(rng.choice([i for i,m in enumerate(MATERIALS) if m.kind==kind]))] for kind in kinds]
-    centers=[]
-    for material in materials:
-        for _ in range(1000):
-            xy=rng.uniform([.445,-.12],[.575,.12])
-            if all(np.linalg.norm(xy-p[:2])>.078 for p in centers):
-                centers.append(np.r_[xy,FLOOR_Z+material.radius+.004])
-                break
+    pools={kind:list(rng.permutation([i for i,m in enumerate(MATERIALS) if m.kind==kind])) for kind in CLASSES} if count>3 else None
+    materials=[]
+    for kind in kinds:
+        if pools is None:
+            index=int(rng.choice([i for i,m in enumerate(MATERIALS) if m.kind==kind]))
         else:
-            raise RuntimeError('Could not sample separated balls')
-    return materials,np.asarray(centers)
+            if not pools[kind]: pools[kind]=list(rng.permutation([i for i,m in enumerate(MATERIALS) if m.kind==kind]))
+            index=int(pools[kind].pop())
+        materials.append(MATERIALS[index])
+    # Restart a crowded packing rather than accepting overlapping balls.
+    for _ in range(32):
+        centers=[]
+        for material in materials:
+            for _ in range(1000):
+                xy=rng.uniform([.445,-.12],[.575,.12]) if count<=3 else rng.uniform([.43,-.16],[.625,.16])
+                if all(np.linalg.norm(xy-p[:2])>.078 for p in centers):
+                    centers.append(np.r_[xy,FLOOR_Z+material.radius+.004])
+                    break
+            else:
+                break
+        if len(centers)==count: return materials,np.asarray(centers)
+    raise RuntimeError('Could not sample separated balls')
 
 
-def scan_points():
+def scan_points(count=6):
     """Known-workspace raster; never receives a ball pose or material label."""
     rows=[]
-    for i,y in enumerate(np.arange(-.08,.081,.04)):
-        xs=np.arange(.405,.616,.005)
+    for i,y in enumerate(np.arange(-.08,.081,.04) if count<=3 else np.arange(-.12,.121,.04)):
+        xs=np.arange(.405,.616 if count<=3 else .656,.005)
         if i%2: xs=xs[::-1]
         rows.extend(np.array([x,y,FLOOR_Z+.025]) for x in xs)
     return rows
@@ -133,6 +145,15 @@ def classify_touch(compliance_m_per_N,roughness_m):
         raise ValueError('Non-finite tactile probe features')
     if roughness_m>1.8e-5: return 'textured'
     return 'soft' if compliance_m_per_N>3.5e-4 else 'hard'
+
+
+def sphere_center_xy(contact_point,force,radius=.024):
+    """Normalize the full outward force before projecting sphere geometry to XY."""
+    point,force=np.asarray(contact_point,dtype=float),np.asarray(force,dtype=float)
+    magnitude=np.linalg.norm(force)
+    if point.shape!=(3,) or force.shape!=(3,) or not np.isfinite([*point,*force,radius]).all() or magnitude<1e-8 or radius<=0:
+        raise ValueError('Expected a finite contact point, nonzero force and positive radius')
+    return (point-radius*force/magnitude)[:2]
 
 
 @dataclass
