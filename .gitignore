@@ -74,6 +74,7 @@ textures.zip
 # Local development, generated datasets, and experiment artifacts
 /.venv-tactile
 /.cache/piano_tactile/
+/.cache/blind_pick_balls/
 /.codex_*/
 /_diagnostics/
 /data_*/

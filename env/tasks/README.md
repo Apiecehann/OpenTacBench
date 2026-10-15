@@ -169,3 +169,74 @@ python -m env.tasks.run_single_finger_piano --song repeated --headless --control
 python -m env.tasks.run_single_finger_piano --song repeated --headless --control hold --output data/single_finger_piano/hold
 python -m pytest -q tests/test_single_finger_piano.py tests/test_piano_audio.py
 ```
+
+## Blind material ball retrieval
+
+`blind_pick_balls.py` is an independent Gymnasium task. It keeps the existing
+`envs/blind_pick.py` unchanged and runs in the standalone tactile environment
+described above, with a Franka Panda and two GelSight Mini pads.
+
+```bash
+bash scripts/run_blind_pick_balls.sh --headless --video
+# Two balls, another target category and another random layout:
+bash scripts/run_blind_pick_balls.sh --headless --video --balls 2 --target soft --seed 3
+```
+
+The default scene contains three balls, one from each category. The catalogue
+has six synthetic material profiles:
+
+| Category | Profiles | Physical difference |
+| --- | --- | --- |
+| `hard` | Polished polymer, hard resin | Smooth spheres, Young's modulus 3 or 6 MPa |
+| `soft` | Rubber, foam | Smooth deformable spheres, Young's modulus 60 or 25 kPa |
+| `textured` | Raised dots, raised ribs | Actual surface relief, Young's modulus 1 MPa |
+
+Every ball is a volumetric FEM mesh, including its raised surface. The seed
+selects profiles when the task is created; resets randomize continuous,
+non-overlapping positions inside the box.
+The target category is public. The policy observation contains 25 robot/TCP
+state values, the three-way target category and `tactile/left/rgb` and
+`tactile/right/rgb`. No scene camera, object pose, material label or seed is
+returned to the policy. The observer camera is used only for video.
+
+The action is `(tcp_x_m, tcp_y_m, tcp_z_m, jaw_position_m)`. The scripted
+demonstrator searches the known workspace, localizes through its own pad
+contacts and probes incremental squeeze compliance and fine contact relief.
+It then lifts the selected ball clear of the rim and releases it into the
+bowl. Scoring independently checks the actual ball's category, a sustained
+bilateral lift and a released ball inside the bowl; a wrong material fails.
+
+PhysX drives the arm; UIPC solves the pads, balls and container together.
+Gel backing poses follow the fingers, with no gel-force feedback to robot
+drives. The task reuses `create_gelsight_mini_cfg` and `VisualTactileSensor`
+from `envs/sensors/tactile.py`, the original Franka GelSight Mini camera optics,
+gel tetrahedra and attachments, bundled Taxim calibration and FEM marker motion.
+The calibrated pixel scale is unchanged; the RGB image includes its moving
+black markers. No custom pad dimensions or orthographic height projection are
+used. The task registers the original sensors and `UipcObject` instances
+with `UipcInteractiveScene`, keeps the original physics callbacks, and calls
+`UipcSim.update_render_meshes()` for rendering. It does not copy cameras,
+create alternate gel surfaces, or override optical parameters.
+Small stationary sphere contacts use UIPC's existing configuration fields
+`eps_velocity=.001` and `newton.velocity_tol=.0001`. Coarse contact settings
+caused creep and loss of the grasp during slow transfers. These task physics
+settings do not change the sensor model or optical calibration.
+The scripted expert uses internal contact forces and physical contact
+relief for search/probing; those measurements are not returned in observations.
+The wrapper also exposes Isaac's bundled Torch libraries for the IK solver.
+
+Outputs are `data/blind_pick_balls/video.mp4` and `result.json`. The video has
+the observer scene and complete left/right tactile RGB images, with titles
+outside the images. Ground-truth labels and positions in `result.json` are
+private diagnostics for validating episodes, separate from observations.
+`--control idle --idle-frames 120` checks the no-action counterfactual.
+
+The default three-ball, seed-0 textured-target demo completed the blind search,
+verified lift and released placement in 45.47 simulated seconds (2728 video
+frames). The rubber and polymer distractors remained inside the box. Its
+recording and diagnostics are in `data/blind_pick_balls/original_api_demo`.
+A separate controlled probe identified rubber as soft and polished polymer as
+hard, with measured squeeze compliances of 0.464 and 0.120 mm/N respectively;
+this probe used known positions to validate classification, rather than blind
+retrieval. A two-ball idle run scored zero and preserved the RGB observation
+contract. These checks do not establish success across all layouts and profiles.
