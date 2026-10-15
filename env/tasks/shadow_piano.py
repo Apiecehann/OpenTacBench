@@ -65,12 +65,7 @@ class Task(PianoTask):
             h,w = self.tactile.image_shape
             self.observation_space = gym.spaces.Dict(state=self.observation_space,
                 tactile=gym.spaces.Dict(index=gym.spaces.Dict(
-                    rgb=gym.spaces.Box(0,255,(h,w,3),np.uint8),
-                    depth=gym.spaces.Box(0,np.inf,(h,w),np.float32),
-                    deformation=gym.spaces.Box(-np.inf,np.inf,(h,w,3),np.float32),
-                    valid_mask=gym.spaces.Box(0,1,(h,w),bool),
-                    marker_displacement=gym.spaces.Box(-np.inf,np.inf,
-                        (len(self.tactile.marker_uv),2),np.float32))))
+                    rgb=gym.spaces.Box(0,255,(h,w,3),np.uint8))))
 
     def _new_score(self):
         holds = HOLD_SECONDS if self.cfg.melody == TWINKLE else tuple(.12 for _ in self.cfg.melody)

@@ -24,7 +24,7 @@ from ._uipc_keyboard import UipcKeyboard,volume_mesh
 
 
 class IndexTactile:
-    image_shape = (120, 160)
+    image_shape = (480, 640)
     size = (.016, .012, .003)
     cells = (8, 6, 2)
     camera_distance = .020
@@ -135,8 +135,9 @@ class IndexTactile:
         self.taxim.sensor_params.pixmm=self.size[0]*1000/self.image_shape[1]
         self.surface_rest=self.rest_sensor[self.front].reshape(self.cells[0]+1,self.cells[1]+1,3)
         self.u,self.v=self.surface_rest[:,0,0],self.surface_rest[0,:,1]
-        self.pixel_u=np.linspace(self.u[0]*.93,self.u[-1]*.93,self.image_shape[1])
-        self.pixel_v=np.linspace(self.v[0]*.93,self.v[-1]*.93,self.image_shape[0])
+        # Sample pixel centres across the entire pad, without the old 7% crop.
+        self.pixel_u=self.u[0]+(np.arange(self.image_shape[1])+.5)*np.ptp(self.u)/self.image_shape[1]
+        self.pixel_v=self.v[0]+(np.arange(self.image_shape[0])+.5)*np.ptp(self.v)/self.image_shape[0]
         self.pixels=np.stack(np.meshgrid(self.pixel_u,self.pixel_v),-1)
         mu=np.arange(self.u[0]+.0015,self.u[-1],.002)
         mv=np.arange(self.v[0]+.0015,self.v[-1],.002)
@@ -231,16 +232,23 @@ class IndexTactile:
         rgb=np.rint(optical[0].movedim(0,-1).cpu().numpy()*255).astype(np.uint8)
         markers=RegularGridInterpolator((self.u,self.v),sensor[self.front].reshape(*self.surface_rest.shape))(self.marker_uv)
         rgb_marker=rgb.copy()
-        rows=(markers[:,1]-self.pixel_v[0])/(self.pixel_v[-1]-self.pixel_v[0])*(self.image_shape[0]-1)
-        cols=(markers[:,0]-self.pixel_u[0])/(self.pixel_u[-1]-self.pixel_u[0])*(self.image_shape[1]-1)
-        rr,cc=np.ogrid[:self.image_shape[0],:self.image_shape[1]]
+        rows=(markers[:,1]-self.v[0])/np.ptp(self.v)*self.image_shape[0]-.5
+        cols=(markers[:,0]-self.u[0])/np.ptp(self.u)*self.image_shape[1]-.5
         ink=np.zeros(self.image_shape)
+        sigma=.8*self.image_shape[1]/160
         for row,col in zip(rows,cols):
-            ink=np.maximum(ink,np.exp(-((rr-row)**2+(cc-col)**2)/(2*.8**2)))
+            # A local six-sigma window avoids full-frame work for each marker.
+            r0=max(0,int(np.floor(row-6*sigma)))
+            r1=min(self.image_shape[0],int(np.ceil(row+6*sigma))+1)
+            c0=max(0,int(np.floor(col-6*sigma)))
+            c1=min(self.image_shape[1],int(np.ceil(col+6*sigma))+1)
+            if r1<=r0 or c1<=c0:
+                continue
+            rr,cc=np.ogrid[r0:r1,c0:c1]
+            ink[r0:r1,c0:c1]=np.maximum(ink[r0:r1,c0:c1],
+                np.exp(-((rr-row)**2+(cc-col)**2)/(2*sigma**2)))
         rgb_marker=np.rint(rgb_marker*(1.-.85*ink[...,None])).astype(np.uint8)
-        self._cache=dict(rgb=rgb_marker,depth=depth.astype(np.float32),
-            deformation=deformation.astype(np.float32),valid_mask=valid,
-            marker_displacement=(markers[:,:2]-self.marker_uv).astype(np.float32))
+        self._cache=dict(rgb=rgb_marker)
         return self._cache
 
     def update_visual(self):
@@ -252,7 +260,8 @@ class IndexTactile:
             backend='bundled libuipc 0.9 FEM + TacEx Taxim',
             pad_size_m=list(self.size),image_shape=list(self.image_shape),
             coordinates='u toward fingertip; v across finger; n outward',
-            depth_unit='metre',deformation_unit='metre',
+            observation_fields=['rgb'],image_dtype='uint8',colour_order='RGB',
+            image_field_of_view='entire 16 x 12 mm pad, pixel-centre sampling, no crop',
             camera_model='orthographic, 20 mm unloaded depth',
             calibration='GelSight Mini optical calibration transferred to a compact virtual pad',
             coupling='prescribed backing; gel and hinged keys solved together in UIPC; key angles mirrored to USD',

@@ -8,7 +8,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser=argparse.ArgumentParser()
-parser.add_argument('--output',type=Path,default=Path('data/shadow_piano_tactile/controls.json'))
+parser.add_argument('--output',type=Path,default=Path('data/shadow_piano_rgb/controls.json'))
 args=parser.parse_args()
 app=AppLauncher(headless=True).app
 
@@ -25,13 +25,22 @@ def main():
         assert task.observation_space.contains(initial)
         assert set(initial['tactile'])=={'index'}
         rest=initial['tactile']['index']
+        assert set(rest)=={'rgb'}
+        assert rest['rgb'].shape==(480,640,3) and rest['rgb'].dtype==np.uint8
+        # Physical checks inspect the solver directly; observations expose RGB only.
+        def displacement():
+            sensor=task.tactile
+            world=np.asarray(sensor.gel_slot.geometry().positions().view()).reshape(-1,3)
+            position,rotation=sensor._body_pose()
+            local=((world-position)@rotation-sensor.origin)@sensor.sensor_to_distal
+            return local-sensor.rest_sensor
         for _ in range(20):
             obs,_,term,trunc,_=task.step(task.demonstration_action('idle'))
             assert not term and not trunc
         assert task.score.count==0 and len(task.score.events)==0
         assert np.max(np.abs(task._key_state()[0]))<.001
-        assert np.max(np.abs(obs['tactile']['index']['deformation']))<1e-5
-        idle_signal=float(np.linalg.norm(obs['tactile']['index']['deformation'],axis=-1).max())
+        idle_signal=float(np.linalg.norm(displacement(),axis=-1).max())
+        assert idle_signal<1e-5
         print('IDLE_OK',flush=True)
         for _ in range(90):
             obs,_,term,trunc,_=task.step(task.demonstration_action('hold'))
@@ -41,11 +50,8 @@ def main():
         assert [e['kind'] for e in task.score.events]==['press']
         # Use the unloaded numerical residual as the signal floor, rather than
         # demanding an arbitrary indentation from a particular elastic modulus.
-        depth_signal=float((rest['depth']-contact['depth']).max())
-        deformation_signal=float(np.linalg.norm(contact['deformation'],axis=-1).max())
-        assert depth_signal>max(1e-6,20*idle_signal)
+        deformation_signal=float(np.linalg.norm(displacement(),axis=-1).max())
         assert deformation_signal>max(1e-6,20*idle_signal)
-        assert np.allclose(contact['depth']-.020,contact['deformation'][...,2],atol=3e-9)
         rgb_change=float(np.abs(contact['rgb'].astype(float)-rest['rgb']).max())
         assert rgb_change>5
         assert task.observation_space.contains(obs)
@@ -56,13 +62,13 @@ def main():
         assert task.score.count==1
         assert [e['kind'] for e in task.score.events]==['press','release']
         assert len(task.audio_contacts.events)==1
-        assert np.max(np.abs(obs['tactile']['index']['deformation']))<1e-5
+        assert np.linalg.norm(displacement(),axis=-1).max()<1e-5
         print('RELEASE_OK',flush=True)
         obs,_=task.reset(seed=0)
         assert task.score.count==0 and len(task.score.events)==0
         assert np.max(np.abs(task._key_state()[0]))<1e-5
-        reset_error=float(np.abs(obs['tactile']['index']['depth']-rest['depth']).max())
-        assert reset_error<1e-6
+        reset_error=int(np.abs(obs['tactile']['index']['rgb'].astype(int)-rest['rgb']).max())
+        assert reset_error<=1
         print('RESET_OK',flush=True)
         # Lift, move above G4, lower, then flex while C4 is the required note.
         y=task.layout[67-21].position[1]-.033
@@ -82,8 +88,8 @@ def main():
         assert wrong_info is not None and wrong_info['failure']=='wrong_key'
         print('WRONG_KEY_OK',flush=True)
         result=dict(idle=True,hold_not_repeated=True,release=True,reset=True,wrong_key=True,
-            observation_contract=True,rgb_change_max_uint8=rgb_change,reset_depth_error_m=reset_error,
-            idle_displacement_m=idle_signal,loaded_depth_signal_m=depth_signal,
+            observation_contract=True,rgb_change_max_uint8=rgb_change,reset_rgb_error_uint8=reset_error,
+            idle_displacement_m=idle_signal,
             loaded_displacement_m=deformation_signal,
             tactile=task.tactile.metadata())
         args.output.parent.mkdir(parents=True,exist_ok=True)

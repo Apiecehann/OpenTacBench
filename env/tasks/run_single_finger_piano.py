@@ -11,7 +11,7 @@ def main():
     parser.add_argument('--song', choices=['twinkle','repeated'], default='twinkle')
     parser.add_argument('--notes', type=int, help='Optional Twinkle prefix length for a smoke run; default is all 42 notes')
     parser.add_argument('--video', action='store_true', help='Record RGB video with contact-triggered audio')
-    parser.add_argument('--tactile', action='store_true', help='Only the Shadow index finger: UIPC FEM, TacEx RGB, depth and deformation')
+    parser.add_argument('--tactile', action='store_true', help='Only the Shadow index finger: GelSight Mini RGB driven by UIPC FEM and TacEx')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--repetitions', type=int, default=5)
     parser.add_argument('--target-midi', type=int, default=60)
@@ -41,11 +41,12 @@ def main():
         from .single_finger_piano import Task, TaskCfg
         cfg=TaskCfg(device=args.device,repetitions=args.repetitions,
                     target_midi=args.target_midi,hand_usd=args.hand_usd)
-    args.output=args.output or Path('data/shadow_piano_tactile' if args.tactile else
+    args.output=args.output or Path('data/shadow_piano_rgb' if args.tactile else
         'data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
 
     task = None
     writer = None
+    rgb_writer = None
     tactile_recorder = None
     failure = None
     video_steps = []
@@ -66,6 +67,8 @@ def main():
                 torch.tensor([[-.01,.48,.46]],device=task.sim.device),
                 torch.tensor([[.40,task.layout[task.target].position[1],.095]],device=task.sim.device))
             writer = imageio.get_writer(args.output/'video.mp4', fps=60, codec='libx264', quality=8)
+            if args.tactile:
+                rgb_writer=imageio.get_writer(args.output/'gelsight.mp4',fps=60,codec='libx264',quality=8)
         task.reset(seed=0)
         print('PIANO_READY',flush=True)
         if args.tactile:
@@ -105,6 +108,7 @@ def main():
                 frame=task.render()
                 if args.tactile:
                     from ._tactile_recording import tactile_panel
+                    rgb_writer.append_data(observation['tactile']['index']['rgb'])
                     frame=tactile_panel(frame,observation['tactile']['index'])
                 writer.append_data(frame)
                 video_steps.append(task.step_count)
@@ -141,6 +145,8 @@ def main():
         traceback.print_exc()
         failure = error
     finally:
+        if rgb_writer is not None:
+            rgb_writer.close()
         if tactile_recorder is not None:
             tactile_recorder.close()
         if writer is not None:

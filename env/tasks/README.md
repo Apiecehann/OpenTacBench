@@ -97,18 +97,19 @@ enabled. `state` retains the usual 97 values. The index dictionary contains:
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
-| `rgb` | 120 × 160 × 3, uint8 | Taxim RGB with FEM-advected markers |
-| `depth` | 120 × 160, float32 | Orthographic surface depth in metres; unloaded depth 0.020 m |
-| `deformation` | 120 × 160 × 3, float32 | Signed material displacement `(u,v,n)` in metres |
-| `valid_mask` | 120 × 160, bool | Pixels covered by the deformed FEM surface |
-| `marker_displacement` | N × 2, float32 | Marker displacement in the sensor plane, in metres |
+| `rgb` | 480 × 640 × 3, uint8 | GelSight Mini Taxim RGB with FEM-advected markers |
 
-`u` points toward the fingertip, `v` across it, and `n` outward from the backing.
-Depth and displacement are projected from actual simulated surface vertices.
-The default output directory is `data/shadow_piano_tactile`: `tactile.h5`
-stores synchronized timestamps, state and `tactile/index/*` arrays; `--video`
-also records the scene alongside RGB/depth/deformation panels with contact
-audio. The original non-tactile command retains its flat observation format.
+The camera covers the entire 16 × 12 mm pad at a 4:3 aspect ratio, without the
+previous 7% inset. Surface depth and displacement remain internal to the FEM
+and optical simulation; tactile observations and recordings expose only RGB.
+The default output directory is `data/shadow_piano_rgb`: `tactile.h5`
+stores synchronized timestamps, state and `tactile/index/rgb`; `--video`
+records `video.mp4` with the scene, complete RGB image and contact audio, plus
+`gelsight.mp4` with just the untouched 640 × 480 tactile frames (silent).
+The composite title sits outside the image, fixing the earlier title bar
+that covered the top 27 rows of the displayed RGB. No depth or deformation
+panels are included. The original non-tactile command retains its flat
+observation format.
 
 To check unloaded contact, a sustained press, release, reset, wrong-key
 rejection and the index observation contract:
