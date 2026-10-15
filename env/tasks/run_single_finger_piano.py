@@ -7,12 +7,14 @@ from isaaclab.app import AppLauncher
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Fixed-palm Allegro index finger playing one piano key')
+    parser = argparse.ArgumentParser(description='One-finger piano: Shadow Hand playing Twinkle or the original Allegro repeated-key task')
+    parser.add_argument('--song', choices=['twinkle','repeated'], default='twinkle')
+    parser.add_argument('--notes', type=int, help='Optional Twinkle prefix length for a smoke run; default is all 42 notes')
     parser.add_argument('--video', action='store_true', help='Record RGB video with contact-triggered audio')
-    parser.add_argument('--output', type=Path, default=Path('data/single_finger_piano'))
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--repetitions', type=int, default=5)
     parser.add_argument('--target-midi', type=int, default=60)
-    parser.add_argument('--hand-usd', help='Optional local Allegro USD; default is the Isaac Lab asset')
+    parser.add_argument('--hand-usd', help='Optional local USD matching the selected hand model')
     parser.add_argument('--control', choices=['demo','idle','hold'], default='demo')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -21,15 +23,25 @@ def main():
     launcher = AppLauncher(args)
     app = launcher.app
     import numpy as np
-    from .single_finger_piano import Task, TaskCfg
+    if args.song=='twinkle':
+        from .shadow_piano import Task, TaskCfg
+        from ._twinkle import TWINKLE
+        if args.notes is not None and not 1<=args.notes<=len(TWINKLE):
+            parser.error('--notes must be between 1 and 42')
+        cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,
+                    melody=TWINKLE[:args.notes] if args.notes is not None else TWINKLE)
+    else:
+        from .single_finger_piano import Task, TaskCfg
+        cfg=TaskCfg(device=args.device,repetitions=args.repetitions,
+                    target_midi=args.target_midi,hand_usd=args.hand_usd)
+    args.output=args.output or Path('data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
 
     task = None
     writer = None
     video_steps = []
     args.output.mkdir(parents=True, exist_ok=True)
     try:
-        task = Task(TaskCfg(device=args.device, repetitions=args.repetitions,
-                            target_midi=args.target_midi, hand_usd=args.hand_usd))
+        task = Task(cfg)
         if args.video:
             import imageio.v2 as imageio
             import isaaclab.sim as sim_utils
@@ -51,7 +63,7 @@ def main():
                 task.camera.update(task.cfg.physics_dt, force_recompute=True)
         done = False
         while app.is_running() and not done:
-            # Smooth 1.2 s strokes. Only the index position target is commanded.
+            # The original fixed-palm task retains its one-dimensional action.
             phase = (task.step_count*task.cfg.physics_dt) % 1.2
             if args.control == 'idle':
                 amount = 0.
@@ -65,13 +77,15 @@ def main():
                 amount = 1.-(phase-.65)/.35
             else:
                 amount = 0.
-            _,_,terminated,truncated,info = task.step(np.array([2*amount-1.],np.float32))
+            action=(task.demonstration_action(args.control) if args.song=='twinkle'
+                    else np.array([2*amount-1.],np.float32))
+            _,_,terminated,truncated,info = task.step(action)
             if writer is not None:
                 writer.append_data(task.render())
                 video_steps.append(task.step_count)
             done = terminated or truncated
         task.audio_contacts.finish(task.step_count)
-        result = dict(task._info(), control=args.control, repetitions=args.repetitions,
+        result = dict(task._info(), control=args.control, song_profile=args.song,
             simulated_seconds=task.step_count*task.cfg.physics_dt,
             max_fixed_joint_error_rad=task.max_fixed_joint_error,
             max_palm_displacement_m=task.max_palm_displacement,
@@ -82,6 +96,9 @@ def main():
             events=task.score.events,
             audio_events=task.audio_contacts.events,
             scoring_source='PhysX key hinge angles and measured key contact forces')
+        if args.song=='twinkle':
+            result.update(expected_midi=list(cfg.melody),max_palm_rotation_rad=task.max_palm_rotation,
+                          fixed_body_measurement_frame='relative to the moving palm')
         if writer is not None:
             writer.close()
             writer = None

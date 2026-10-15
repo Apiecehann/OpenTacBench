@@ -1,7 +1,7 @@
 """Fixed Allegro palm, one movable index joint, repeated physical C4 presses.
 
 Import after Isaac Lab's AppLauncher. This Gymnasium task uses PhysX rather than
-the arm/gripper-specific TacEx task base; run with env.tasks.run_single_finger_piano.
+the arm/gripper-specific TacEx task base; select --song repeated in the launcher.
 """
 from dataclasses import dataclass
 import math
@@ -70,10 +70,7 @@ class Task(gym.Env):
         self.sim.reset()
         self.hand.update(cfg.physics_dt)
         self.keys.update(cfg.physics_dt)
-        self._index = self.hand.find_joints('index_joint_1')[0][0]
-        self._fixed = [i for i in range(self.hand.num_joints) if i != self._index]
-        self._fixed_bodies = [i for i,name in enumerate(self.hand.body_names)
-                              if name not in ('index_link_1','index_link_2','index_link_3')]
+        self._configure_hand_state()
         self._fixed_body_positions = self.hand.data.body_pos_w[:,self._fixed_bodies].clone()
         self._rest = self.hand.data.default_joint_pos.clone()
         self._root = self.hand.data.root_state_w.clone()
@@ -84,8 +81,17 @@ class Task(gym.Env):
                            for m in range(21,109)]
         self._contact_order = [next(i for i,p in enumerate(contact_paths) if f'Key_{m}' in p.split('/'))
                                for m in range(21,109)]
-        self.score = SingleKeyScore(self.target, cfg.repetitions)
+        self.score = self._new_score()
         self.audio_contacts = PianoContacts()
+
+    def _configure_hand_state(self):
+        self._index = self.hand.find_joints('index_joint_1')[0][0]
+        self._fixed = [i for i in range(self.hand.num_joints) if i != self._index]
+        self._fixed_bodies = [i for i,name in enumerate(self.hand.body_names)
+                              if name not in ('index_link_1','index_link_2','index_link_3')]
+
+    def _new_score(self):
+        return SingleKeyScore(self.target, self.cfg.repetitions)
 
     def _box(self, path, center, size, color, **kwargs):
         shape = sim_utils.CuboidCfg(size=size, visual_material=sim_utils.PreviewSurfaceCfg(
@@ -200,7 +206,7 @@ class Task(gym.Env):
         for _ in range(120):
             self._physics_step(self._rest)
         self.step_count = 0
-        self.score = SingleKeyScore(self.target, self.cfg.repetitions)
+        self.score = self._new_score()
         self.audio_contacts = PianoContacts()
         self._done = False
         self.max_fixed_joint_error = self.max_palm_displacement = 0.
@@ -227,14 +233,30 @@ class Task(gym.Env):
                     terminal_reason=('success' if self.score.success else self.score.failure
                         or ('timeout' if self.step_count*self.cfg.physics_dt >= self.cfg.episode_seconds else '')))
 
-    def step(self, action):
-        if self._done:
-            raise RuntimeError('Call reset() before stepping a completed episode')
+    def _action_target(self, action):
         action = np.asarray(action, dtype=float)
         if action.shape != (1,) or not np.isfinite(action).all():
             raise ValueError('Action must contain one finite index-finger command')
         target = self._rest.clone()
         target[0,self._index] = (float(np.clip(action[0],-1.,1.))+1.)*.5*self.cfg.press_joint_angle
+        return target
+
+    def _check_hand_motion(self):
+        error = (float(torch.abs(self.hand.data.joint_pos[:,self._fixed]-self._rest[:,self._fixed]).max())
+                 if self._fixed else 0.)
+        fixed_displacement = float(torch.linalg.vector_norm(
+            self.hand.data.body_pos_w[:,self._fixed_bodies]-self._fixed_body_positions,dim=-1).max())
+        self.max_fixed_body_displacement = max(self.max_fixed_body_displacement,fixed_displacement)
+        displacement = float(torch.linalg.vector_norm(self.hand.data.root_pos_w-self._root[:,:3]))
+        self.max_fixed_joint_error = max(self.max_fixed_joint_error,error)
+        self.max_palm_displacement = max(self.max_palm_displacement,displacement)
+        if error > .005 or displacement > .001 or fixed_displacement > .001:
+            self.score.failure = 'fixed_hand_moved'
+
+    def step(self, action):
+        if self._done:
+            raise RuntimeError('Call reset() before stepping a completed episode')
+        target = self._action_target(action)
         before = self.score.count
         for _ in range(self.cfg.action_repeat):
             self._physics_step(target)
@@ -242,17 +264,8 @@ class Task(gym.Env):
             angles, forces = self._key_state()
             self.key_peak_angles = np.maximum(self.key_peak_angles, angles)
             self.key_peak_forces = np.maximum(self.key_peak_forces, forces)
-            self.max_key_depression = max(self.max_key_depression, float(angles[self.target]))
-            error = (float(torch.abs(self.hand.data.joint_pos[:,self._fixed]-self._rest[:,self._fixed]).max())
-                     if self._fixed else 0.)
-            fixed_displacement = float(torch.linalg.vector_norm(
-                self.hand.data.body_pos_w[:,self._fixed_bodies]-self._fixed_body_positions,dim=-1).max())
-            self.max_fixed_body_displacement = max(self.max_fixed_body_displacement,fixed_displacement)
-            displacement = float(torch.linalg.vector_norm(self.hand.data.root_pos_w-self._root[:,:3]))
-            self.max_fixed_joint_error = max(self.max_fixed_joint_error,error)
-            self.max_palm_displacement = max(self.max_palm_displacement,displacement)
-            if error > .005 or displacement > .001 or fixed_displacement > .001:
-                self.score.failure = 'fixed_hand_moved'
+            self.max_key_depression = max(self.max_key_depression, float(angles[self.score.active_key]))
+            self._check_hand_motion()
             self.score.advance(angles, forces, self.cfg.physics_dt, self.step_count)
             self.audio_contacts.advance(self.step_count, forces)
             if self.score.success or self.score.failure:

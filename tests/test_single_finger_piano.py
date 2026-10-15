@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from env.tasks._single_key_score import SingleKeyScore
+from env.tasks._twinkle import TWINKLE, HOLD_SECONDS
 
 
 def tick(score, angle, force=1., seconds=.1, key=39):
@@ -56,3 +57,29 @@ def test_invalid_measurements_and_configuration():
         SingleKeyScore(repetitions=0)
     with pytest.raises(ValueError):
         SingleKeyScore().advance(np.full(88,np.nan),np.zeros(88),.01,0)
+
+
+def test_complete_twinkle_pitch_order_and_phrase_durations():
+    assert TWINKLE[:14] == (60,60,67,67,69,69,67,65,65,64,64,62,62,60)
+    assert len(TWINKLE)==42 and TWINKLE[:14]==TWINKLE[-14:]
+    assert [i for i,v in enumerate(HOLD_SECONDS) if v>.12]==[6,13,20,27,34,41]
+    score=SingleKeyScore(key_sequence=tuple(m-21 for m in TWINKLE), note_hold_seconds=HOLD_SECONDS)
+    for i,midi in enumerate(TWINKLE):
+        assert score.active_key==midi-21
+        tick(score,.04,seconds=HOLD_SECONDS[i],key=midi-21)
+        assert score.count==i
+        tick(score,0.,key=midi-21)
+        assert score.count==i+1
+    assert score.success
+    assert [e['midi'] for e in score.events if e['kind']=='press']==list(TWINKLE)
+
+
+def test_sequence_requires_correct_pitch_and_long_note_hold():
+    score=SingleKeyScore(key_sequence=(39,46),note_hold_seconds=(.1,.4))
+    tick(score,.04,key=39)
+    tick(score,0.,key=39)
+    tick(score,.04,key=46,seconds=.2)
+    tick(score,0.,key=46)
+    assert score.count==1 and not score.success
+    tick(score,.04,key=39)
+    assert score.failure=='wrong_key'
