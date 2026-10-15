@@ -272,6 +272,11 @@ On fresh-process seeds 0, 1, and 2, complete retrieval passed in 841, 1148, and 
 
 ## Piano articulation (`play_piano`)
 
+For a fixed-palm Allegro hand that repeatedly presses one key with its index
+finger, see [`env/tasks/single_finger_piano.py`](../env/tasks/single_finger_piano.py)
+and its [standalone launcher and interface](../env/tasks/README.md). That task
+uses PhysX and a one-dimensional action instead of the arm/gripper collector.
+
 The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The existing arm and tactile gripper pick up a tapping tool and play C4 C4 G4 G4 A4, the first five notes of *Twinkle, Twinkle, Little Star*. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces. The tool has a rounded dark teal grip, brass ferrule and cap, satin steel shaft, and ivory-coloured compliant tip. Its detailed visible surface is also its deforming FEM contact surface, with a 26 mm grip, 7.8 mm tip, and 108 mm overall length. Static box panels and piano supports are also exactly fixed so collision geometry stays aligned with the visual shells under gravity. Both key motion and fingertip reactions are simulated through UIPC contact.
 
 The robot directly picks up the tapping tool and plays the fixed phrase. There is no tactile reference, cue-matching action, or randomized articulation label. Notes alternate short-light and long-firm, starting short-light: 1.5 ± 0.45 N for 0.20 s, then 3.0 ± 0.45 N for 0.60 s. Scoring uses physical key contact loads at every 120 Hz physics tick, including wrong-key presses, overload, early release, and late release. Success also requires acquisition of the tapping tool.
