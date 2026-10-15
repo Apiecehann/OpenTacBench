@@ -33,6 +33,94 @@ Shadow Hand asset. Materials change the appearance; motion and scoring use the
 same physical model. The asset downloads from NVIDIA on first launch.
 `--hand-usd` may select a local copy of the same hand model.
 
+## Index-only GelSight-like sensing
+
+The optional `--tactile` backend uses the **bundled modified libuipc 0.9** for
+real FEM gel deformation and **TacEx Taxim** for optical RGB. Only the index
+distal link has a sensor. A compact 16 × 12 × 3 mm virtual pad fits over one
+white key. GelSight Mini optical calibration is transferred to this smaller
+virtual geometry; it is not a calibration of a physical fingertip sensor.
+
+For the standalone Isaac Sim 5.1 / Isaac Lab 2.3.2 environment, install build
+tools (`cmake >= 3.26`, `ninja-build`, `build-essential`, `autoconf`, `automake`,
+`libtool`, `pkg-config`, `git`, `curl`, `zip`, `unzip`) and a CUDA 12.8 toolkit.
+From the repository root:
+
+```bash
+bash scripts/install_piano_tactile.sh
+bash scripts/run_piano_tactile.sh --headless --video
+```
+
+`ISAAC_SIM_ROOT` selects the standalone Isaac installation (default `/isaac-sim`).
+The installer creates a separate environment under `.cache/piano_tactile` and
+links it as `.venv-tactile`; `PIANO_TACTILE_ROOT` selects another build/data
+location. It preserves Isaac's Python/PyTorch installation and installs the
+matching Python 3.11 / PyTorch 2.7 CUDA 12.8 scatter wheel. Building libuipc
+requires more time and disk space than installing the Python wrappers alone.
+For restricted networks, optional `PIANO_GITHUB_BASE` and
+`PIANO_GITHUB_DOWNLOAD_PREFIX` select Git and archive transports respectively;
+archive checksums remain enforced.
+
+The tactile task keeps 240 Hz physics and 60 Hz control/recording. The backing
+follows the index distal link. Gel and reachable piano keys are solved together
+in UIPC, using affine rigid keys, rear revolute hinges, 1 N m/rad return springs,
+0.025 N m s/rad damping and mechanical travel stops. The visible Isaac keyboard
+mirrors measured UIPC hinge angles; PhysX drives the hand. Contact energy
+gradients include `dt²`, so forces in newtons are `-gradient / dt²`. Scoring still
+requires real key depression, sustained contact and a separate release.
+
+In this variant the rail Y bounds cover the selected melody plus 8 mm at each
+end. The finite-width pad can also reach adjacent wrong notes, which are
+included in the solver and rejected by scoring. The fixed wrist X position
+places the fingertip ahead of the black-key region, so its contact domain is
+the front white keys. Other keys retain their visual positions. The gel has
+189 FEM nodes and 576 tetrahedra; its simulated surface is resampled to the
+image resolution. The virtual gel uses Young's modulus 100 kPa and Poisson ratio
+0.45. This sensing model prescribes the backing pose and does not return gel
+reaction forces to the hand motor.
+Position commands are limited to 1 m/s lateral travel, 0.375 m/s lift and
+8 rad/s index flexion to protect the small gel from impulsive commands;
+`TaskCfg.tactile_action_rates` configures these limits.
+A 40 ms command filter also smooths abrupt changes; configure it with
+`TaskCfg.tactile_command_filter_seconds`.
+The tactile demonstrator uses 1.2 s note spacing (2.4 s at phrase endings) so
+filtered presses meet the same physical hold/release requirements.
+
+The installer uses the repository's modified source. Its headless compatibility
+fixes make UI registration optional, allow reuse of the separately built native
+library and disable an unfinished shell registration that conflicts with the
+revolute joint's model ID. The zlib 1.3.1 build is pinned to its upstream Git
+commit because its old archive endpoint is unavailable on some networks.
+
+`reset()` and `step()` return `{"state": ..., "tactile": {"index": ...}}` when
+enabled. `state` retains the usual 97 values. The index dictionary contains:
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `rgb` | 120 × 160 × 3, uint8 | Taxim RGB with FEM-advected markers |
+| `depth` | 120 × 160, float32 | Orthographic surface depth in metres; unloaded depth 0.020 m |
+| `deformation` | 120 × 160 × 3, float32 | Signed material displacement `(u,v,n)` in metres |
+| `valid_mask` | 120 × 160, bool | Pixels covered by the deformed FEM surface |
+| `marker_displacement` | N × 2, float32 | Marker displacement in the sensor plane, in metres |
+
+`u` points toward the fingertip, `v` across it, and `n` outward from the backing.
+Depth and displacement are projected from actual simulated surface vertices.
+The default output directory is `data/shadow_piano_tactile`: `tactile.h5`
+stores synchronized timestamps, state and `tactile/index/*` arrays; `--video`
+also records the scene alongside RGB/depth/deformation panels with contact
+audio. The original non-tactile command retains its flat observation format.
+
+To check unloaded contact, a sustained press, release, reset, wrong-key
+rejection and the index observation contract:
+
+```bash
+PYTHONEXE="$PWD/.venv-tactile/bin/python" /isaac-sim/python.sh scripts/check_piano_tactile.py
+```
+
+The complete tactile demonstration was verified with 42 separate press/release
+cycles, matching contact audio and 3473 synchronized video/data frames. The
+controls check also verifies that holding a key cannot produce repeated notes.
+
 ## Original fixed-palm task
 
 `single_finger_piano.Task` fixes an Allegro hand's palm and every joint except
@@ -66,8 +154,9 @@ The episode ends on success, a wrong key, fixed-hand motion, or the 15 s timeout
 
 This task has its own launcher because the existing `envs/` collector and
 TacEx tactile observations assume a Franka arm with a parallel gripper. It does
-not export GelSight/Xense/Neote fingertip images or use that collector's action
-format. Existing tasks and collection commands retain their current interfaces.
+not use that collector's action format. The original Allegro variant has no
+tactile images; the Shadow variant supports the optional index sensor above.
+Existing tasks and collection commands retain their current interfaces.
 
 ```bash
 # Physics controls: idle must score zero; holding must score at most one cycle.

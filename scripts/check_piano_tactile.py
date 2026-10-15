@@ -1,0 +1,106 @@
+"""Physical controls: idle, held contact, release, reset and wrong-key rejection.
+
+Run with the isolated tactile Python through Isaac Sim's python.sh.
+"""
+import argparse
+import json
+from pathlib import Path
+from isaaclab.app import AppLauncher
+
+parser=argparse.ArgumentParser()
+parser.add_argument('--output',type=Path,default=Path('data/shadow_piano_tactile/controls.json'))
+args=parser.parse_args()
+app=AppLauncher(headless=True).app
+
+
+def main():
+    import sys
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+    import numpy as np
+    from env.tasks.shadow_piano import Task,TaskCfg
+    task=None
+    try:
+        task=Task(TaskCfg(tactile=True,melody=(60,67),episode_seconds=5.))
+        initial,_=task.reset(seed=0)
+        assert task.observation_space.contains(initial)
+        assert set(initial['tactile'])=={'index'}
+        rest=initial['tactile']['index']
+        for _ in range(20):
+            obs,_,term,trunc,_=task.step(task.demonstration_action('idle'))
+            assert not term and not trunc
+        assert task.score.count==0 and len(task.score.events)==0
+        assert np.max(np.abs(task._key_state()[0]))<.001
+        assert np.max(np.abs(obs['tactile']['index']['deformation']))<1e-5
+        idle_signal=float(np.linalg.norm(obs['tactile']['index']['deformation'],axis=-1).max())
+        print('IDLE_OK',flush=True)
+        for _ in range(90):
+            obs,_,term,trunc,_=task.step(task.demonstration_action('hold'))
+            assert not term and not trunc
+        contact=obs['tactile']['index']
+        assert task.score.count==0
+        assert [e['kind'] for e in task.score.events]==['press']
+        # Use the unloaded numerical residual as the signal floor, rather than
+        # demanding an arbitrary indentation from a particular elastic modulus.
+        depth_signal=float((rest['depth']-contact['depth']).max())
+        deformation_signal=float(np.linalg.norm(contact['deformation'],axis=-1).max())
+        assert depth_signal>max(1e-6,20*idle_signal)
+        assert deformation_signal>max(1e-6,20*idle_signal)
+        assert np.allclose(contact['depth']-.020,contact['deformation'][...,2],atol=3e-9)
+        rgb_change=float(np.abs(contact['rgb'].astype(float)-rest['rgb']).max())
+        assert rgb_change>5
+        assert task.observation_space.contains(obs)
+        print('HOLD_AND_TACTILE_OK',flush=True)
+        for _ in range(30):
+            obs,_,term,trunc,_=task.step(task.demonstration_action('idle'))
+            assert not term and not trunc
+        assert task.score.count==1
+        assert [e['kind'] for e in task.score.events]==['press','release']
+        assert len(task.audio_contacts.events)==1
+        assert np.max(np.abs(obs['tactile']['index']['deformation']))<1e-5
+        print('RELEASE_OK',flush=True)
+        obs,_=task.reset(seed=0)
+        assert task.score.count==0 and len(task.score.events)==0
+        assert np.max(np.abs(task._key_state()[0]))<1e-5
+        reset_error=float(np.abs(obs['tactile']['index']['depth']-rest['depth']).max())
+        assert reset_error<1e-6
+        print('RESET_OK',flush=True)
+        # Lift, move above G4, lower, then flex while C4 is the required note.
+        y=task.layout[67-21].position[1]-.033
+        start=float(task.hand.data.joint_pos[0,task._y])
+        for i in range(24):
+            obs,_,term,trunc,_=task.step(np.array([start+(y-start)*(i+1)/24,.03,0.]))
+            assert not term and not trunc
+        for i in range(12):
+            obs,_,term,trunc,_=task.step(np.array([y,.03*(1-(i+1)/12),0.]))
+            assert not term and not trunc
+        wrong_info=None
+        for i in range(40):
+            _,_,term,trunc,info=task.step(np.array([y,0.,task.cfg.press_joint_angle*min(1,(i+1)/12)]))
+            if term or trunc:
+                wrong_info=info
+                break
+        assert wrong_info is not None and wrong_info['failure']=='wrong_key'
+        print('WRONG_KEY_OK',flush=True)
+        result=dict(idle=True,hold_not_repeated=True,release=True,reset=True,wrong_key=True,
+            observation_contract=True,rgb_change_max_uint8=rgb_change,reset_depth_error_m=reset_error,
+            idle_displacement_m=idle_signal,loaded_depth_signal_m=depth_signal,
+            loaded_displacement_m=deformation_signal,
+            tactile=task.tactile.metadata())
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        args.output.write_text(json.dumps(result,indent=2))
+        print('TACTILE_CONTROLS '+json.dumps(result),flush=True)
+    finally:
+        if task is not None:
+            task.close()
+
+
+exit_code=0
+try:
+    main()
+except BaseException:
+    import traceback
+    traceback.print_exc()
+    exit_code=1
+finally:
+    app.close(wait_for_replicator=False)
+raise SystemExit(exit_code)

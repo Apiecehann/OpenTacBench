@@ -20,6 +20,14 @@ import toml
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
+# Allow an explicitly prebuilt, separately installed libuipc (e.g. a shared
+# out-of-tree CUDA build). The default still builds the bundled native source.
+USE_PREBUILT = os.environ.get("TACEX_UIPC_USE_PREBUILT", "0") == "1"
+if USE_PREBUILT:
+    import importlib.util
+    if importlib.util.find_spec("uipc") is None:
+        raise RuntimeError("TACEX_UIPC_USE_PREBUILT=1 requires an installed libuipc Python package")
+
 # Obtain the extension data from the extension.toml file
 EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
 # Read the extension.toml file
@@ -120,7 +128,7 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Isaac Sim :: 4.5.0",
     ],
-    ext_modules=[CMakeExtension("uipc", "libuipc")],
-    cmdclass=dict(build_ext=CMakeBuild),
+    ext_modules=[] if USE_PREBUILT else [CMakeExtension("uipc", "libuipc")],
+    cmdclass={} if USE_PREBUILT else dict(build_ext=CMakeBuild),
     zip_safe=False,
 )

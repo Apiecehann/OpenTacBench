@@ -270,11 +270,16 @@ class Task(gym.Env):
             self.audio_contacts.advance(self.step_count, forces)
             if self.score.success or self.score.failure:
                 break
+        self._before_render()
         self.sim.render()
         terminated = self.score.success or bool(self.score.failure)
         truncated = self.step_count*self.cfg.physics_dt >= self.cfg.episode_seconds and not terminated
         self._done = terminated or truncated
         return self._observation(), float(self.score.count-before), terminated, truncated, self._info()
+
+    def _before_render(self):
+        """Allow derived tasks to synchronize external simulated geometry."""
+        pass
 
     def render(self):
         # The CLI attaches an RTX camera only when recording is requested.

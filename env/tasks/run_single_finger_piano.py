@@ -11,6 +11,7 @@ def main():
     parser.add_argument('--song', choices=['twinkle','repeated'], default='twinkle')
     parser.add_argument('--notes', type=int, help='Optional Twinkle prefix length for a smoke run; default is all 42 notes')
     parser.add_argument('--video', action='store_true', help='Record RGB video with contact-triggered audio')
+    parser.add_argument('--tactile', action='store_true', help='Only the Shadow index finger: UIPC FEM, TacEx RGB, depth and deformation')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--repetitions', type=int, default=5)
     parser.add_argument('--target-midi', type=int, default=60)
@@ -18,26 +19,35 @@ def main():
     parser.add_argument('--control', choices=['demo','idle','hold'], default='demo')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if args.tactile and args.song != 'twinkle':
+        parser.error('--tactile currently uses the Shadow Hand / twinkle task')
     if args.video:
         args.enable_cameras = True
     launcher = AppLauncher(args)
     app = launcher.app
+    import signal
+    def stop_requested(signum, frame):
+        raise KeyboardInterrupt('Simulation stop requested')
+    signal.signal(signal.SIGTERM,stop_requested)
     import numpy as np
     if args.song=='twinkle':
         from .shadow_piano import Task, TaskCfg
         from ._twinkle import TWINKLE
         if args.notes is not None and not 1<=args.notes<=len(TWINKLE):
             parser.error('--notes must be between 1 and 42')
-        cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,
+        cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,tactile=args.tactile,
                     melody=TWINKLE[:args.notes] if args.notes is not None else TWINKLE)
     else:
         from .single_finger_piano import Task, TaskCfg
         cfg=TaskCfg(device=args.device,repetitions=args.repetitions,
                     target_midi=args.target_midi,hand_usd=args.hand_usd)
-    args.output=args.output or Path('data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
+    args.output=args.output or Path('data/shadow_piano_tactile' if args.tactile else
+        'data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
 
     task = None
     writer = None
+    tactile_recorder = None
+    failure = None
     video_steps = []
     args.output.mkdir(parents=True, exist_ok=True)
     try:
@@ -57,6 +67,10 @@ def main():
                 torch.tensor([[.40,task.layout[task.target].position[1],.095]],device=task.sim.device))
             writer = imageio.get_writer(args.output/'video.mp4', fps=60, codec='libx264', quality=8)
         task.reset(seed=0)
+        print('PIANO_READY',flush=True)
+        if args.tactile:
+            from ._tactile_recording import TactileRecorder
+            tactile_recorder=TactileRecorder(args.output/'tactile.h5',task)
         if args.video:
             for _ in range(16):
                 task.sim.render()
@@ -79,9 +93,20 @@ def main():
                 amount = 0.
             action=(task.demonstration_action(args.control) if args.song=='twinkle'
                     else np.array([2*amount-1.],np.float32))
-            _,_,terminated,truncated,info = task.step(action)
+            observation,_,terminated,truncated,info = task.step(action)
+            if tactile_recorder is not None:
+                tactile_recorder.append(observation)
+                if tactile_recorder.count % 30 == 0:
+                    print(f'PIANO_TACTILE t={task.step_count*cfg.physics_dt:.2f}s '
+                          f'notes={task.score.count}/{task.score.repetitions} '
+                          f'indentation={task.tactile.peak_indentation*1000:.3f}mm '
+                          f'solver={task.tactile.solve_seconds:.2f}s',flush=True)
             if writer is not None:
-                writer.append_data(task.render())
+                frame=task.render()
+                if args.tactile:
+                    from ._tactile_recording import tactile_panel
+                    frame=tactile_panel(frame,observation['tactile']['index'])
+                writer.append_data(frame)
                 video_steps.append(task.step_count)
             done = terminated or truncated
         task.audio_contacts.finish(task.step_count)
@@ -99,6 +124,9 @@ def main():
         if args.song=='twinkle':
             result.update(expected_midi=list(cfg.melody),max_palm_rotation_rad=task.max_palm_rotation,
                           fixed_body_measurement_frame='relative to the moving palm')
+        if args.tactile:
+            result['tactile']=task.tactile.metadata()
+            result['scoring_source']='UIPC key hinge poses and measured gel/key contact reactions'
         if writer is not None:
             writer.close()
             writer = None
@@ -108,11 +136,13 @@ def main():
         print('PIANO_RESULT '+json.dumps(result),flush=True)
         if args.control == 'demo' and not result['success']:
             raise RuntimeError('Single-finger demonstration failed; see result.json')
-    except Exception:
+    except BaseException as error:
         import traceback
         traceback.print_exc()
-        raise
+        failure = error
     finally:
+        if tactile_recorder is not None:
+            tactile_recorder.close()
         if writer is not None:
             writer.close()
         if task is not None:
@@ -123,6 +153,8 @@ def main():
             if context is not None:
                 context._disable_app_control_on_stop_handle = True
         app.close(wait_for_replicator=False)
+    if failure is not None:
+        raise SystemExit(130 if isinstance(failure,KeyboardInterrupt) else 1)
 
 
 if __name__ == '__main__':

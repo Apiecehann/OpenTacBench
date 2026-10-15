@@ -28,18 +28,65 @@ class TaskCfg(PianoCfg):
     hand_position: tuple = (-.011, 0., .110)
     hand_rotation: tuple = (0., 2**-.5, -2**-.5, 0.)
     melody: tuple = TWINKLE
+    tactile: bool = False
+    tactile_workspace: str = '.cache/piano_tactile/world'
+    tactile_action_rates: tuple = (1., .375, 8.)  # Y m/s, Z m/s, index rad/s
+    tactile_command_filter_seconds: float = .04
+    tactile_youngs_modulus_Pa: float = 100000.
+
+    def __post_init__(self):
+        if self.tactile:
+            rates=np.asarray(self.tactile_action_rates,dtype=float)
+            if (rates.shape!=(3,) or not np.isfinite(rates).all() or (rates<=0).any()
+                    or not math.isfinite(self.tactile_command_filter_seconds)
+                    or self.tactile_command_filter_seconds<=0
+                    or not math.isfinite(self.tactile_youngs_modulus_Pa)
+                    or self.tactile_youngs_modulus_Pa<=0):
+                raise ValueError('Tactile command rates, filter time and elastic modulus must be finite and positive')
+        if self.tactile and self.press_joint_angle == .55:
+            self.press_joint_angle = .50
 
 
 class Task(PianoTask):
     def __init__(self, cfg=None, render_mode=None):
+        self.tactile = None
+        self._last_action = None
         super().__init__(cfg or TaskCfg(), render_mode)
-        self.action_space = gym.spaces.Box(np.array([-.16,0.,0.],np.float32),
-            np.array([.10,.05,self.cfg.press_joint_angle],np.float32))
+        y_limits=(-.16,.10)
+        if self.cfg.tactile:
+            centers=[self.layout[m-21].position[1]-.033 for m in self.cfg.melody]
+            y_limits=(min(centers)-.008,max(centers)+.008)
+        self.action_space = gym.spaces.Box(np.array([y_limits[0],0.,0.],np.float32),
+            np.array([y_limits[1],.05,self.cfg.press_joint_angle],np.float32))
         self.observation_space = gym.spaces.Box(-np.inf,np.inf,(97,),np.float32)
+        if self.cfg.tactile:
+            from ._index_tactile import IndexTactile
+            self.tactile = IndexTactile(self)
+            h,w = self.tactile.image_shape
+            self.observation_space = gym.spaces.Dict(state=self.observation_space,
+                tactile=gym.spaces.Dict(index=gym.spaces.Dict(
+                    rgb=gym.spaces.Box(0,255,(h,w,3),np.uint8),
+                    depth=gym.spaces.Box(0,np.inf,(h,w),np.float32),
+                    deformation=gym.spaces.Box(-np.inf,np.inf,(h,w,3),np.float32),
+                    valid_mask=gym.spaces.Box(0,1,(h,w),bool),
+                    marker_displacement=gym.spaces.Box(-np.inf,np.inf,
+                        (len(self.tactile.marker_uv),2),np.float32))))
 
     def _new_score(self):
         holds = HOLD_SECONDS if self.cfg.melody == TWINKLE else tuple(.12 for _ in self.cfg.melody)
         return SingleKeyScore(key_sequence=tuple(m-21 for m in self.cfg.melody), note_hold_seconds=holds)
+
+    def _create_keyboard(self):
+        super()._create_keyboard()
+        if self.cfg.tactile:
+            # UIPC owns gel/key contact and the hinged key dynamics. These
+            # articulations mirror measured angles for scene rendering only.
+            for key in self.layout:
+                path=f'/World/Keyboard/Key_{key.midi}'
+                UsdPhysics.CollisionAPI(self.stage.GetPrimAtPath(path+'/Body')).CreateCollisionEnabledAttr(False)
+                joint=UsdPhysics.RevoluteJoint(self.stage.GetPrimAtPath(path+'/hinge'))
+                joint.GetLowerLimitAttr().Set(-6.)
+                joint.GetUpperLimitAttr().Set(2.)
 
     def _create_hand(self):
         cfg = SHADOW_HAND_CFG.replace(prim_path='/World/Hand')
@@ -133,6 +180,12 @@ class Task(PianoTask):
         UsdGeom.Imageable(self.stage.GetPrimAtPath('/World/PalmStand')).MakeInvisible()
         self._box('/World/WristRail',(-.011,0.,.040),(.09,.36,.08),(.035,.045,.060))
         self._finish_hand()
+        if self.cfg.tactile:
+            # UIPC gel supplies index contact; remove the original rigid pad's
+            # duplicate collision with the keys.
+            for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand/robot0_ffdistal')):
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
 
     def _finish_hand(self):
         from envs._force_task_utils import _material
@@ -162,6 +215,9 @@ class Task(PianoTask):
         self._palm_quat=self.hand.data.body_quat_w[:,self._palm].clone()
 
     def reset(self, **kwargs):
+        self._last_action=None
+        if self.tactile is not None:
+            self.tactile.reset()
         result=super().reset(**kwargs)
         self._demo_note=0
         self._demo_start=0.
@@ -169,11 +225,42 @@ class Task(PianoTask):
         self.max_palm_rotation=0.
         return result
 
+    def _physics_step(self, target):
+        super()._physics_step(target)
+        if self.tactile is not None:
+            self.tactile.step()
+
+    def _key_state(self):
+        angles,forces=super()._key_state()
+        if self.tactile is not None:
+            angles=self.tactile.keyboard.angles.copy()
+            forces=np.abs(self.tactile.key_forces[:,2])
+        return angles,forces
+
+    def _before_render(self):
+        if self.tactile is not None:
+            self.tactile.update_visual()
+
+    def close(self):
+        if self.tactile is not None:
+            self.tactile.close()
+        super().close()
+
     def _action_target(self, action):
         a=np.asarray(action,dtype=float)
         if a.shape!=(3,) or not np.isfinite(a).all():
             raise ValueError('Action must contain finite rail Y (m), lift Z (m), and index flexion (rad)')
         a=np.clip(a,self.action_space.low,self.action_space.high)
+        if self.cfg.tactile:
+            # Position targets can otherwise command an impulsive lift/flex
+            # combination that collapses a millimetre-scale soft gel.
+            previous=(self._last_action if self._last_action is not None else
+                self.hand.data.joint_pos[0,[self._y,self._z,self._index]].cpu().numpy())
+            alpha=1-math.exp(-self.cfg.physics_dt*self.cfg.action_repeat/self.cfg.tactile_command_filter_seconds)
+            a=previous+alpha*(a-previous)
+            delta=np.asarray(self.cfg.tactile_action_rates)*self.cfg.physics_dt*self.cfg.action_repeat
+            a=np.clip(a,previous-delta,previous+delta)
+            self._last_action=a.copy()
         q=self._rest.clone()
         q[0,[self._y,self._z,self._index]]=torch.as_tensor(a,dtype=q.dtype,device=q.device)
         return q
@@ -193,9 +280,12 @@ class Task(PianoTask):
     def _observation(self):
         ids=[self._y,self._z,self._index]
         angles,_=self._key_state()
-        return np.r_[self.hand.data.joint_pos[0,ids].cpu().numpy(),
+        state = np.r_[self.hand.data.joint_pos[0,ids].cpu().numpy(),
             self.hand.data.joint_vel[0,ids].cpu().numpy(),angles,
             self.score.count/self.score.repetitions,float(self.score._armed),self.score.active_key/87].astype(np.float32)
+        if self.tactile is None:
+            return state
+        return dict(state=state,tactile=dict(index=self.tactile.observation()))
 
     def _info(self):
         result=super()._info()
@@ -211,7 +301,8 @@ class Task(PianoTask):
             return np.array([-.09175,0.,self.cfg.press_joint_angle])
         now=self.step_count*self.cfg.physics_dt
         old_note=self._demo_note
-        duration=2. if old_note%7==6 else 1.
+        duration=((2.4 if old_note%7==6 else 1.2) if self.cfg.tactile
+                  else (2. if old_note%7==6 else 1.))
         if self.score.count!=old_note:
             if now-self._demo_start<duration:
                 return np.array([self.layout[self.cfg.melody[old_note]-21].position[1]-.033,.03,0.])
@@ -229,7 +320,8 @@ class Task(PianoTask):
             return np.array([y,.03*(1-smooth((elapsed-.35)/.12)),0.])
         if elapsed<.59:
             return np.array([y,0.,self.cfg.press_joint_angle*smooth((elapsed-.47)/.12)])
-        release_at=1.74 if self._demo_note%7==6 else .74
+        release_at=((2.10 if self._demo_note%7==6 else .90) if self.cfg.tactile
+                    else (1.74 if self._demo_note%7==6 else .74))
         if elapsed<release_at:
             return np.array([y,0.,self.cfg.press_joint_angle])
         v=smooth((elapsed-release_at)/.14)

@@ -1,5 +1,10 @@
 # Installation Guide
 
+The standalone Shadow Hand piano task additionally supports Isaac Sim 5.1 /
+Isaac Lab 2.3.2 with index-only UIPC/Taxim sensing. Its isolated installer and
+runner are documented in [env/tasks/README.md](../env/tasks/README.md#index-only-gelsight-like-sensing).
+The instructions below describe the original arm/gripper task environment.
+
 ## Installation all-in-one Script
 
 Clone ViTaForge and run `scripts/install.sh` to set up the environment and install Isaac Sim, Isaac Lab, TacEx, cuRobo, and the other required packages. The current installer retains the legacy `UniVTAC` Conda environment name for compatibility.
