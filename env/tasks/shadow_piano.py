@@ -32,19 +32,19 @@ class TaskCfg(PianoCfg):
     tactile_workspace: str = '.cache/piano_tactile/world'
     tactile_action_rates: tuple = (1., .375, 8.)  # Y m/s, Z m/s, index rad/s
     tactile_command_filter_seconds: float = .04
-    tactile_youngs_modulus_Pa: float = 100000.
 
     def __post_init__(self):
         if self.tactile:
             rates=np.asarray(self.tactile_action_rates,dtype=float)
             if (rates.shape!=(3,) or not np.isfinite(rates).all() or (rates<=0).any()
                     or not math.isfinite(self.tactile_command_filter_seconds)
-                    or self.tactile_command_filter_seconds<=0
-                    or not math.isfinite(self.tactile_youngs_modulus_Pa)
-                    or self.tactile_youngs_modulus_Pa<=0):
-                raise ValueError('Tactile command rates, filter time and elastic modulus must be finite and positive')
+                    or self.tactile_command_filter_seconds<=0):
+                raise ValueError('Tactile command rates and filter time must be finite and positive')
         if self.tactile and self.press_joint_angle == .55:
             self.press_joint_angle = .50
+        if self.tactile and self.hand_position == (-.011, 0., .110):
+            # Offset the wrist for the full Mini housing at the pressed pose.
+            self.hand_position = (.003, 0., .1355)
 
 
 class Task(PianoTask):
@@ -60,12 +60,16 @@ class Task(PianoTask):
             np.array([y_limits[1],.05,self.cfg.press_joint_angle],np.float32))
         self.observation_space = gym.spaces.Box(-np.inf,np.inf,(97,),np.float32)
         if self.cfg.tactile:
-            from ._index_tactile import IndexTactile
-            self.tactile = IndexTactile(self)
+            self.tactile.setup()
             h,w = self.tactile.image_shape
             self.observation_space = gym.spaces.Dict(state=self.observation_space,
                 tactile=gym.spaces.Dict(index=gym.spaces.Dict(
                     rgb=gym.spaces.Box(0,255,(h,w,3),np.uint8))))
+
+    def _create_tactile(self):
+        if self.cfg.tactile:
+            from ._index_tactile import IndexTactile
+            self.tactile = IndexTactile(self)
 
     def _new_score(self):
         holds = HOLD_SECONDS if self.cfg.melody == TWINKLE else tuple(.12 for _ in self.cfg.melody)
@@ -211,6 +215,8 @@ class Task(PianoTask):
 
     def reset(self, **kwargs):
         self._last_action=None
+        self._audio_active=np.zeros(88,bool)
+        self._audio_peaks=np.zeros(88)
         if self.tactile is not None:
             self.tactile.reset()
         result=super().reset(**kwargs)
@@ -218,6 +224,10 @@ class Task(PianoTask):
         self._demo_start=0.
         self._demo_y_start=float(self.hand.data.joint_pos[0,self._y])
         self.max_palm_rotation=0.
+        if self.tactile is not None:
+            self.tactile.sensor.reset_reference()
+            self.tactile.update_visual()
+            return self._observation(), self._info()
         return result
 
     def _physics_step(self, target):
@@ -231,6 +241,19 @@ class Task(PianoTask):
             angles=self.tactile.keyboard.angles.copy()
             forces=np.abs(self.tactile.key_forces[:,2])
         return angles,forces
+
+    def _audio_forces(self, angles, forces):
+        if self.tactile is None:
+            return forces
+        # A piano hammer fires once per key stroke. Use measured key travel
+        # for the latch and actual contact peaks for loudness.
+        self._audio_peaks=np.maximum(self._audio_peaks,forces)
+        self._audio_active|=angles>=self.score.press_angle
+        up=angles<=self.score.release_angle
+        self._audio_active[up]=False
+        signal=np.where(self._audio_active,self._audio_peaks,0.)
+        self._audio_peaks[up]=0.
+        return signal
 
     def _before_render(self):
         if self.tactile is not None:

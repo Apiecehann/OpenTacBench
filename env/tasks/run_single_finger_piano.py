@@ -21,7 +21,7 @@ def main():
     args = parser.parse_args()
     if args.tactile and args.song != 'twinkle':
         parser.error('--tactile currently uses the Shadow Hand / twinkle task')
-    if args.video:
+    if args.video or args.tactile:
         args.enable_cameras = True
     launcher = AppLauncher(args)
     app = launcher.app
@@ -35,13 +35,13 @@ def main():
         from ._twinkle import TWINKLE
         if args.notes is not None and not 1<=args.notes<=len(TWINKLE):
             parser.error('--notes must be between 1 and 42')
-        cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,tactile=args.tactile,
+        cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,tactile=args.tactile,record_video=args.video,
                     melody=TWINKLE[:args.notes] if args.notes is not None else TWINKLE)
     else:
         from .single_finger_piano import Task, TaskCfg
-        cfg=TaskCfg(device=args.device,repetitions=args.repetitions,
+        cfg=TaskCfg(device=args.device,repetitions=args.repetitions,record_video=args.video,
                     target_midi=args.target_midi,hand_usd=args.hand_usd)
-    args.output=args.output or Path('data/shadow_piano_rgb' if args.tactile else
+    args.output=args.output or Path('data/shadow_piano_calibrated' if args.tactile else
         'data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
 
     task = None
@@ -55,13 +55,6 @@ def main():
         task = Task(cfg)
         if args.video:
             import imageio.v2 as imageio
-            import isaaclab.sim as sim_utils
-            from isaaclab.sensors import Camera, CameraCfg
-            task.camera = Camera(CameraCfg(prim_path='/World/RecordingCamera',
-                width=960, height=640, data_types=['rgb'],
-                spawn=sim_utils.PinholeCameraCfg(focal_length=24., horizontal_aperture=36.,
-                                               clipping_range=(.01,10.))))
-            task.sim.reset()
             import torch
             task.camera.set_world_poses_from_view(
                 torch.tensor([[-.01,.48,.46]],device=task.sim.device),
@@ -103,7 +96,7 @@ def main():
                     print(f'PIANO_TACTILE t={task.step_count*cfg.physics_dt:.2f}s '
                           f'notes={task.score.count}/{task.score.repetitions} '
                           f'indentation={task.tactile.peak_indentation*1000:.3f}mm '
-                          f'solver={task.tactile.solve_seconds:.2f}s',flush=True)
+                          f'RGB={observation["tactile"]["index"]["rgb"].shape}',flush=True)
             if writer is not None:
                 frame=task.render()
                 if args.tactile:

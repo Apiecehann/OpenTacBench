@@ -33,13 +33,14 @@ Shadow Hand asset. Materials change the appearance; motion and scoring use the
 same physical model. The asset downloads from NVIDIA on first launch.
 `--hand-usd` may select a local copy of the same hand model.
 
-## Index-only GelSight-like sensing
+## Index-only calibrated GelSight Mini
 
-The optional `--tactile` backend uses the **bundled modified libuipc 0.9** for
-real FEM gel deformation and **TacEx Taxim** for optical RGB. Only the index
-distal link has a sensor. A compact 16 × 12 × 3 mm virtual pad fits over one
-white key. GelSight Mini optical calibration is transferred to this smaller
-virtual geometry; it is not a calibration of a physical fingertip sensor.
+The optional `--tactile` backend mounts the repository's original, unscaled
+GelSight Mini assembly on the Shadow index distal link. It calls
+`envs.sensors.tactile.create_gelsight_mini_cfg` and `VisualTactileSensor`
+directly. Camera optics, gel tetrahedra, attachments, FEM marker motion and
+Taxim calibration come from that existing implementation. The task changes
+only the assembly's rigid mounting pose and keyboard mechanics.
 
 For the standalone Isaac Sim 5.1 / Isaac Lab 2.3.2 environment, install build
 tools (`cmake >= 3.26`, `ninja-build`, `build-essential`, `autoconf`, `automake`,
@@ -73,13 +74,12 @@ In this variant the rail Y bounds cover the selected melody plus 8 mm at each
 end. The finite-width pad can also reach adjacent wrong notes, which are
 included in the solver and rejected by scoring. The fixed wrist X position
 places the fingertip ahead of the black-key region, so its contact domain is
-the front white keys. Other keys retain their visual positions. The gel has
-189 FEM nodes and 576 tetrahedra; its simulated surface is resampled to the
-image resolution. The virtual gel uses Young's modulus 100 kPa and Poisson ratio
-0.45. This sensing model prescribes the backing pose and does not return gel
-reaction forces to the hand motor.
+the front white keys. Other keys retain their visual positions. The sensor
+retains the original gel dimensions, material settings and
+calibrated pixel scale. The backing follows the index through the original
+UIPC attachment callback; reaction forces do not feed back into PhysX motors.
 Position commands are limited to 1 m/s lateral travel, 0.375 m/s lift and
-8 rad/s index flexion to protect the small gel from impulsive commands;
+8 rad/s index flexion to smooth contact transitions;
 `TaskCfg.tactile_action_rates` configures these limits.
 A 40 ms command filter also smooths abrupt changes; configure it with
 `TaskCfg.tactile_command_filter_seconds`.
@@ -99,10 +99,10 @@ enabled. `state` retains the usual 97 values. The index dictionary contains:
 | --- | --- | --- |
 | `rgb` | 480 × 640 × 3, uint8 | GelSight Mini Taxim RGB with FEM-advected markers |
 
-The camera covers the entire 16 × 12 mm pad at a 4:3 aspect ratio, without the
-previous 7% inset. Surface depth and displacement remain internal to the FEM
+The complete original camera frame is returned without cropping or overlays.
+Surface depth and displacement remain internal to the FEM
 and optical simulation; tactile observations and recordings expose only RGB.
-The default output directory is `data/shadow_piano_rgb`: `tactile.h5`
+The default output directory is `data/shadow_piano_calibrated`: `tactile.h5`
 stores synchronized timestamps, state and `tactile/index/rgb`; `--video`
 records `video.mp4` with the scene, complete RGB image and contact audio, plus
 `gelsight.mp4` with just the untouched 640 × 480 tactile frames (silent).
@@ -118,9 +118,13 @@ rejection and the index observation contract:
 PYTHONEXE="$PWD/.venv-tactile/bin/python" /isaac-sim/python.sh scripts/check_piano_tactile.py
 ```
 
-The complete tactile demonstration was verified with 42 separate press/release
-cycles, matching contact audio and 3473 synchronized video/data frames. The
-controls check also verifies that holding a key cannot produce repeated notes.
+The original-API implementation passed all 42 press/release cycles and produced
+42 contact-driven audio notes, with 3472 synchronized RGB/video frames over
+57.86 simulated seconds. The controls verify idle, sustained hold, release,
+physical reset and wrong-key rejection. Unmarked optical RGB changes under
+contact and resets exactly; the original marker brightness noise remains enabled.
+The earlier compact-pad recordings remain in `data/shadow_piano_rgb`; the
+calibrated run is in `data/shadow_piano_calibrated/full`.
 
 ## Original fixed-palm task
 

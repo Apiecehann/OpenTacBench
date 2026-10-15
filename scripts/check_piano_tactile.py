@@ -8,9 +8,9 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser=argparse.ArgumentParser()
-parser.add_argument('--output',type=Path,default=Path('data/shadow_piano_rgb/controls.json'))
+parser.add_argument('--output',type=Path,default=Path('data/shadow_piano_calibrated/controls.json'))
 args=parser.parse_args()
-app=AppLauncher(headless=True).app
+app=AppLauncher(headless=True,enable_cameras=True).app
 
 
 def main():
@@ -20,20 +20,19 @@ def main():
     from env.tasks.shadow_piano import Task,TaskCfg
     task=None
     try:
-        task=Task(TaskCfg(tactile=True,melody=(60,67),episode_seconds=5.))
+        task=Task(TaskCfg(tactile=True,melody=(60,67),episode_seconds=5.,
+            tactile_workspace='.cache/piano_tactile/controls'))
         initial,_=task.reset(seed=0)
         assert task.observation_space.contains(initial)
         assert set(initial['tactile'])=={'index'}
         rest=initial['tactile']['index']
+        rest_optical=task.tactile.sensor.get_observations(['rgb'])['rgb'].cpu().numpy().copy()
         assert set(rest)=={'rgb'}
         assert rest['rgb'].shape==(480,640,3) and rest['rgb'].dtype==np.uint8
         # Physical checks inspect the solver directly; observations expose RGB only.
+        reference_nodes=task.tactile.sensor.get_init_pts().cpu().numpy().copy()
         def displacement():
-            sensor=task.tactile
-            world=np.asarray(sensor.gel_slot.geometry().positions().view()).reshape(-1,3)
-            position,rotation=sensor._body_pose()
-            local=((world-position)@rotation-sensor.origin)@sensor.sensor_to_distal
-            return local-sensor.rest_sensor
+            return task.tactile.sensor.get_init_pts().cpu().numpy()-reference_nodes
         for _ in range(20):
             obs,_,term,trunc,_=task.step(task.demonstration_action('idle'))
             assert not term and not trunc
@@ -54,6 +53,9 @@ def main():
         assert deformation_signal>max(1e-6,20*idle_signal)
         rgb_change=float(np.abs(contact['rgb'].astype(float)-rest['rgb']).max())
         assert rgb_change>5
+        optical=task.tactile.sensor.get_observations(['rgb'])['rgb'].cpu().numpy()
+        optical_change=float(np.abs(optical.astype(float)-rest_optical).max())
+        assert optical_change>5  # Independent of the original marker brightness noise.
         assert task.observation_space.contains(obs)
         print('HOLD_AND_TACTILE_OK',flush=True)
         for _ in range(30):
@@ -68,7 +70,14 @@ def main():
         assert task.score.count==0 and len(task.score.events)==0
         assert np.max(np.abs(task._key_state()[0]))<1e-5
         reset_error=int(np.abs(obs['tactile']['index']['rgb'].astype(int)-rest['rgb']).max())
-        assert reset_error<=1
+        # The original renderer adds independent visual noise to the ink dots.
+        # Check deterministic optical RGB and physical reset independently.
+        reset_optical=task.tactile.sensor.get_observations(['rgb'])['rgb'].cpu().numpy()
+        reset_optical_error=int(np.abs(reset_optical.astype(int)-rest_optical).max())
+        assert reset_optical_error<=1
+        assert np.linalg.norm(displacement(),axis=-1).max()<1e-5
+        markers=task.tactile.sensor.get_observations(['marker'])['marker'].cpu().numpy()
+        assert np.linalg.norm(markers[1]-markers[0],axis=-1).max()<.5
         print('RESET_OK',flush=True)
         # Lift, move above G4, lower, then flex while C4 is the required note.
         y=task.layout[67-21].position[1]-.033
@@ -89,6 +98,8 @@ def main():
         print('WRONG_KEY_OK',flush=True)
         result=dict(idle=True,hold_not_repeated=True,release=True,reset=True,wrong_key=True,
             observation_contract=True,rgb_change_max_uint8=rgb_change,reset_rgb_error_uint8=reset_error,
+            optical_rgb_change_max_uint8=optical_change,
+            reset_optical_rgb_error_uint8=reset_optical_error,
             idle_displacement_m=idle_signal,
             loaded_displacement_m=deformation_signal,
             tactile=task.tactile.metadata())

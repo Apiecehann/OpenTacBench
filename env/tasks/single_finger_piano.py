@@ -37,6 +37,7 @@ class TaskCfg:
     # Local +Z points along the keys; positive index flexion points downward.
     hand_rotation: tuple = (.27059805, .65328148, .27059805, .65328148)
     hand_usd: str | None = None
+    record_video: bool = False
 
 
 class Task(gym.Env):
@@ -63,6 +64,13 @@ class Task(gym.Env):
         self._done = False
         self._create_keyboard()
         self._create_hand()
+        self._create_tactile()
+        if cfg.record_video:
+            from isaaclab.sensors import Camera, CameraCfg
+            self.camera = Camera(CameraCfg(prim_path='/World/RecordingCamera',
+                width=960, height=640, data_types=['rgb'],
+                spawn=sim_utils.PinholeCameraCfg(focal_length=24., horizontal_aperture=36.,
+                                               clipping_range=(.01,10.))))
         self.key_contacts = ContactSensor(ContactSensorCfg(
             prim_path='/World/Keyboard/Key_.*/Body', update_period=0., history_length=1))
         self.sim.set_camera_view((-.10,-.60,.53), (.44, self.layout[self.target].position[1], .09))
@@ -83,6 +91,10 @@ class Task(gym.Env):
                                for m in range(21,109)]
         self.score = self._new_score()
         self.audio_contacts = PianoContacts()
+
+    def _create_tactile(self):
+        """Create optional sensors before the first simulation reset."""
+        pass
 
     def _configure_hand_state(self):
         self._index = self.hand.find_joints('index_joint_1')[0][0]
@@ -267,7 +279,7 @@ class Task(gym.Env):
             self.max_key_depression = max(self.max_key_depression, float(angles[self.score.active_key]))
             self._check_hand_motion()
             self.score.advance(angles, forces, self.cfg.physics_dt, self.step_count)
-            self.audio_contacts.advance(self.step_count, forces)
+            self.audio_contacts.advance(self.step_count, self._audio_forces(angles, forces))
             if self.score.success or self.score.failure:
                 break
         self._before_render()
@@ -280,6 +292,9 @@ class Task(gym.Env):
     def _before_render(self):
         """Allow derived tasks to synchronize external simulated geometry."""
         pass
+
+    def _audio_forces(self, angles, forces):
+        return forces
 
     def render(self):
         # The CLI attaches an RTX camera only when recording is requested.

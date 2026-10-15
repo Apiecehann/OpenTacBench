@@ -67,7 +67,8 @@ TACEX_UIPC_USE_PREBUILT=1 "$venv/bin/python" -m pip install --no-deps --no-build
 # TacEx's legacy dependency URL names a cp310 wheel; this task uses cp311/torch 2.7.
 "$venv/bin/python" -m pip install --no-deps 'torch_scatter==2.1.2+pt27cu128' \
     -f 'https://data.pyg.org/whl/torch-2.7.0+cu128.html'
-"$venv/bin/python" -m pip install --no-deps wildmeshing meshio svgwrite
+"$venv/bin/python" -m pip install --no-deps wildmeshing meshio svgwrite \
+    'transforms3d==0.4.2' 'scikit-learn==1.5.2' joblib threadpoolctl
 if [ ! -e "$repo/.venv-tactile" ] && [ ! -L "$repo/.venv-tactile" ]; then
     ln -s "$venv" "$repo/.venv-tactile"
 fi
