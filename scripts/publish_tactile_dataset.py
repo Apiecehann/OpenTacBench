@@ -4,8 +4,30 @@ from datetime import datetime,timezone
 import hashlib
 import json
 from pathlib import Path
+import time
 
 TASKS=('tension_strap','arm_shadow_piano','play_piano')
+
+
+def verify_published_file(api,repo_id,directory,name):
+    from modelscope_hub.errors import FileIntegrityError
+    directory=Path(directory)
+    expected=hashlib.sha256((directory/name).read_bytes()).hexdigest()
+    delays=(0,2,5,10,20)
+    for attempt,delay in enumerate(delays):
+        if delay:time.sleep(delay)
+        try:
+            path=api.download_file(repo_id,'dataset',name,
+                local_dir=directory/'.readback',force=True,expected_sha256=expected)
+        except FileIntegrityError:
+            # A replaced branch-tip file can briefly resolve to the previous
+            # CDN version. Keep the exact expected hash and allow propagation.
+            if attempt==len(delays)-1:raise
+            continue
+        if hashlib.sha256(path.read_bytes()).hexdigest()!=expected:
+            raise ValueError('Catalog readback differs')
+        path.unlink()
+        return
 
 
 def build_catalog(root):
@@ -56,11 +78,12 @@ def build_catalog(root):
         'Only episodes that pass native success, data/clock validation, full RGB decoding and upload-manifest readback enter `dataset_index.json`.',
         'The first accepted HDF5 in each task also passes a complete download and SHA-256 comparison.',
         '',
-        '- `tension_strap`: two stages `[F1_N, T1_s, F2_N, T2_s]`, forces 0–24 N; sustained physical tolerance ±0.5 N, retained grasp and original damage limits. Instruction sampling is independent of the hidden material stream.',
+        '- `tension_strap`: two stages `[F1_N, T1_s, F2_N, T2_s]`, forces 0–24 N; each duration is the minimum continuous hold within the physical ±0.5 N band while retaining the grasp. Original damage limits remain active. Instruction sampling is independent of the hidden material stream.',
         '- `arm_shadow_piano`: Franka + Shadow index finger, original DIGIT/TACTO configuration. Six random C4–B4 notes, required light/heavy force bands, holds and releases. `tactile.h5` contains RGB, state, issued actions, start/stop physics steps and aligned `piano/` labels.',
         '- `play_piano`: Franka + original TacEx GelSight Mini gripper, picked-up tapping tool. Six random C4–B4 notes, required light/heavy force bands, holds and releases. Original HDF5 layout and JPEG tactile images are retained; `piano_steps/` retains every physics tick.',
         '',
         'Each episode directory includes `result.json` and `checksums.json`; legacy tasks also include configuration and metadata. The index gives each HDF5 path, SHA-256, frame count and requested instruction.',
+        'Files under `_checks/` are upload/readback tests and are excluded from the requested 50 episodes per task.',
         'Recorded ground-truth diagnostics are for auditing. These are scripted demonstrations; they do not establish learned-policy performance.',
         '',
         'Native environment: Isaac Sim 5.1, Isaac Lab 2.3.2, libuipc 0.9.0, Torch 2.7 / CUDA 12.8, one NVIDIA L40S. Each episode starts a fresh native scene. Physics is 120 Hz for strap/tool and 240 Hz for the Shadow task; observations/actions are 60 Hz and 30 Hz respectively.',
@@ -89,11 +112,7 @@ def main():
             allow_patterns=['README.md','dataset_index.json'],max_workers=2,disable_tqdm=True,
             commit_message='Update validated dataset counts and index')
         for name in ('README.md','dataset_index.json'):
-            expected=hashlib.sha256((directory/name).read_bytes()).hexdigest()
-            path=api.download_file(args.repo_id,'dataset',name,
-                local_dir=directory/'.readback',force=True,expected_sha256=expected)
-            if hashlib.sha256(path.read_bytes()).hexdigest()!=expected:raise ValueError('Catalog readback differs')
-            path.unlink()
+            verify_published_file(api,args.repo_id,directory,name)
     print(json.dumps(dict(complete=index['complete'],counts={k:v['published_validated_episodes'] for k,v in index['tasks'].items()})))
 
 

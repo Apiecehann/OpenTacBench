@@ -1,6 +1,8 @@
 import io
 import hashlib
 import json
+import sys
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -8,7 +10,7 @@ import pytest
 from PIL import Image
 
 from scripts.validate_tactile_recording import audit_recording
-from scripts.publish_tactile_dataset import build_catalog
+from scripts.publish_tactile_dataset import build_catalog,verify_published_file
 
 
 def make_recording(path,raw=False):
@@ -87,3 +89,22 @@ def test_catalog_includes_only_uploaded_and_fully_audited_episodes(tmp_path):
     progress.write_text(json.dumps(dict(attempts=[attempt])))
     with recording.open('ab') as stream:stream.write(b'changed after audit')
     with pytest.raises(ValueError,match='changed after its RGB audit'):build_catalog(tmp_path)
+
+
+def test_catalog_readback_waits_for_new_content_and_retains_exact_hash(tmp_path,monkeypatch):
+    import scripts.publish_tactile_dataset as publisher
+    class IntegrityError(Exception):pass
+    monkeypatch.setitem(sys.modules,'modelscope_hub.errors',SimpleNamespace(FileIntegrityError=IntegrityError))
+    waits=[];calls=[]
+    monkeypatch.setattr(publisher.time,'sleep',waits.append)
+    source=tmp_path/'README.md';source.write_bytes(b'current verified counts')
+    expected=hashlib.sha256(source.read_bytes()).hexdigest()
+    class Api:
+        def download_file(self,repo,kind,name,**kwargs):
+            calls.append(kwargs['expected_sha256'])
+            if len(calls)<3:raise IntegrityError('previous cached branch-tip file')
+            path=tmp_path/'downloaded.md';path.write_bytes(source.read_bytes());return path
+    verify_published_file(Api(),'owner/data',tmp_path,'README.md')
+    assert calls==[expected]*3 and waits==[2,5]
+    assert source.read_bytes()==b'current verified counts'
+    assert not (tmp_path/'downloaded.md').exists()
