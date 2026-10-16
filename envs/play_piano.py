@@ -44,7 +44,7 @@ class TaskCfg(MemoryTaskCfg):
     piano_notes = None
     piano_dynamics = None
     piano_note_count = 6
-    piano_require_dynamics = False
+    piano_require_dynamics = True
     piano_wrong_key_policy = 'fail'
     piano_hold_seconds = .12
 

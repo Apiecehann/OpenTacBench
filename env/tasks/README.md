@@ -62,10 +62,10 @@ These additions apply to `envs/play_piano.py` (Franka and tapping tool) and
 `env/tasks/arm_shadow_piano.py` (Franka and Shadow index).
 
 ```bash
-# The user's example, with default pitch-order scoring:
+# The user's example, with default pitch-order and force-band scoring:
 bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --sequence "C# C G A E F" --dynamics "light heavy light heavy light heavy"
-# Also require the measured force band for each note:
-bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --sequence "C#4 C4 G4 A4 E4 F4" --dynamics "light heavy light heavy light heavy" --judge-dynamics
+# Explicitly disable force-band scoring, retaining per-tick dynamics labels:
+bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --sequence "C#4 C4 G4 A4 E4 F4" --dynamics "light heavy light heavy light heavy" --no-judge-dynamics
 # No prompt: six random notes; a seed makes the prompt reproducible:
 bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --seed 0
 ```
@@ -90,9 +90,12 @@ All serial/parallel collection/evaluation entries
 apply these piano-only settings. Both tasks also accept
 `reset(options={"notes": ["C#4", "C4"], "dynamics": ["light", "heavy"]})`.
 
-Default success requires pitches in order, physical contact, a minimum hold
-and separate releases. Light/heavy does not affect default success. Strict
-dynamics is optional. Duration is independent of dynamics; `--hold-seconds`
+Default success requires pitches in order, physical contact in the requested
+force band, a minimum hold and separate releases. Both task configs enable
+dynamics judging by default. Use `--no-judge-dynamics` for the hand or
+`piano_require_dynamics: false` for the gripper to disable force-band scoring;
+target/actual dynamics remain annotated. `--judge-dynamics` still explicitly
+enables it. Duration is independent of dynamics; `--hold-seconds`
 or `piano_hold_seconds` changes it. The tool task additionally requires tool
 acquisition and rejects physical overload. Its policy still submits END through
 the existing interface.

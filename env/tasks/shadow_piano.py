@@ -38,7 +38,7 @@ class TaskCfg(PianoCfg):
     piano_notes: object = None
     piano_dynamics: object = None
     piano_note_count: int = 6
-    piano_require_dynamics: bool = False
+    piano_require_dynamics: bool = True
     piano_wrong_key_policy: str = 'fail'
     piano_hold_seconds: object = None
     piano_seed: int | None = None

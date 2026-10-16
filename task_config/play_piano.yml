@@ -2,7 +2,7 @@ sensor_type: gsmini
 piano_notes: null  # e.g. [C#4, C4, G4, A4, E4, F4]; null samples six C4-B4 notes
 piano_note_count: 6
 piano_dynamics: null  # e.g. [light, heavy, light, heavy, light, heavy]
-piano_require_dynamics: false
+piano_require_dynamics: true  # require the requested measured force band; false checks pitch/hold/release only
 piano_wrong_key_policy: fail  # retry keeps the current target after a wrong key
 piano_hold_seconds: 0.12
 decimation: 1

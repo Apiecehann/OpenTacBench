@@ -12,7 +12,8 @@ def main():
     parser.add_argument('--song', choices=['random','twinkle','repeated'], default='random')
     parser.add_argument('--sequence',help='Ordered notes, for example "C#4 C4 G4 A4 E4 F4"; octave defaults to 4')
     parser.add_argument('--dynamics',help='light/heavy once or once per note; default is seeded random dynamics')
-    parser.add_argument('--judge-dynamics',action='store_true',help='Require the target measured force band as well as pitch')
+    parser.add_argument('--judge-dynamics',action=argparse.BooleanOptionalAction,default=None,
+                        help='Require the measured force band (movable-hand default); --no-judge-dynamics disables it')
     parser.add_argument('--wrong-key-policy',choices=['fail','retry'],default='fail')
     parser.add_argument('--hold-seconds',type=float,help='Minimum hold for each note; independent of light/heavy')
     parser.add_argument('--seed',type=int,help='Reproduce the random note/dynamics sequence')
@@ -58,8 +59,10 @@ def main():
                     tactile_image_width=args.image_width,tactile_sensor=args.tactile_sensor or ('digit' if args.wrist=='arm' else 'gsmini'),
                     melody=(TWINKLE[:args.notes] if args.notes is not None else TWINKLE) if args.song=='twinkle' else None,
                     piano_notes=args.sequence,piano_dynamics=args.dynamics,piano_note_count=args.notes or 6,
-                    piano_require_dynamics=args.judge_dynamics,piano_wrong_key_policy=args.wrong_key_policy,
+                    piano_wrong_key_policy=args.wrong_key_policy,
                     piano_hold_seconds=args.hold_seconds,piano_seed=args.seed)
+        if args.judge_dynamics is not None:
+            cfg.piano_require_dynamics=args.judge_dynamics
     else:
         from .single_finger_piano import Task, TaskCfg
         cfg=TaskCfg(device=args.device,repetitions=args.repetitions,record_video=args.video,
