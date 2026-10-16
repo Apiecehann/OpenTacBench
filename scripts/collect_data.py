@@ -15,6 +15,8 @@ sys.path.append('.')
 parser = argparse.ArgumentParser(
     description="Collect data"
 )
+from isaaclab.app import AppLauncher
+AppLauncher.add_app_launcher_args(parser)
 parser.add_argument(
     "task",
     type=str,
@@ -150,9 +152,6 @@ args_cli = parser.parse_args()
 if args_cli.gpu is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = args_cli.gpu
 
-from isaaclab.app import AppLauncher
-AppLauncher.add_app_launcher_args(parser)
-
 # parse the arguments
 args_cli.enable_cameras = True
 args_cli.num_envs = 1
@@ -252,7 +251,7 @@ def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
         suc_map_path = task.save_root / 'suc_map.txt'
         if suc_map_path.exists():
             with open(suc_map_path, 'r') as f:
-                suc_map = f.read().strip().split(' ')
+                suc_map = f.read().split()
             suc_num = sum([1 for s in suc_map if s == '1'])
             seed = len(suc_map)
             log(f"Use seed with {suc_num} successful episodes. Starting from seed {seed}.")
@@ -291,7 +290,9 @@ def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
         
         seed += 1
     
-    log(f'Complete collection, success rate: {suc_num}/{seed} ({(suc_num / seed) * 100:.2f}%)')
+    attempts = len(suc_map)
+    rate = 100.0 * suc_num / attempts if attempts else 0.0
+    log(f'Complete collection, success rate: {suc_num}/{attempts} ({rate:.2f}%)')
 
     task.close()
     simulation_app.close()
@@ -320,6 +321,8 @@ def main():
 
     task_module = importlib.import_module(f"envs.{task_file_name}")
     env_cfg:'BaseTaskCfg' = task_module.TaskCfg()
+    from envs._piano_sequence import configure_piano_task
+    configure_piano_task(env_cfg,task_config)
     if "background" in task_config:
         env_cfg.background = str(task_config["background"])
     if hasattr(env_cfg, "target_block"):

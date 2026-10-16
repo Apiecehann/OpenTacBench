@@ -13,12 +13,19 @@ class SingleKeyScore:
     release_seconds: float = .10
     key_sequence: tuple = ()
     note_hold_seconds: tuple = ()
+    force_targets: tuple = ()
+    force_tolerances: tuple = ()
+    require_dynamics: bool = False
+    wrong_key_policy: str = 'fail'
+    mistakes: int = 0
     count: int = 0
     failure: str = ""
     events: list = field(default_factory=list)
     _held: float = 0.
     _released: float = 0.
     _armed: bool = False
+    _wrong_contact: bool = False
+    _overheld: float = 0.
 
     def __post_init__(self):
         if self.key_sequence:
@@ -32,6 +39,12 @@ class SingleKeyScore:
                 or (self.note_hold_seconds and (len(self.note_hold_seconds) != self.repetitions
                     or any(not math.isfinite(t) or t <= 0 for t in self.note_hold_seconds)))):
             raise ValueError('Invalid repeated-key scoring configuration')
+        if self.wrong_key_policy not in ('fail','retry'):
+            raise ValueError('wrong_key_policy must be fail or retry')
+        if self.require_dynamics and (len(self.force_targets)!=self.repetitions
+                or len(self.force_tolerances)!=self.repetitions
+                or any(not math.isfinite(v) or v<=0 for v in (*self.force_targets,*self.force_tolerances))):
+            raise ValueError('Dynamics scoring needs one positive force target and tolerance per note')
 
     @property
     def success(self):
@@ -45,15 +58,26 @@ class SingleKeyScore:
         if (len(angles) != 88 or len(forces) != 88 or not math.isfinite(dt) or dt <= 0
                 or not all(math.isfinite(x) for x in (*angles, *forces))):
             raise ValueError('Scoring requires 88 finite key angles/forces and a positive timestep')
-        if self.failure:
+        if self.failure or self.success:
             return
         key = self.active_key
         if any(angle >= self.press_angle for i, angle in enumerate(angles) if i != key):
-            self.failure = 'wrong_key'
+            if not self._wrong_contact: self.mistakes+=1
+            self._wrong_contact=True
+            if self.wrong_key_policy=='fail': self.failure = 'wrong_key'
+            self._held=self._released=0.
+            self._armed=False
+            self._overheld=0.
             return
-        if self.success:
-            return
+        self._wrong_contact=False
         down = angles[key] >= self.press_angle and forces[key] >= .1
+        if self.require_dynamics:
+            target,tolerance=self.force_targets[self.count],self.force_tolerances[self.count]
+            self._overheld=self._overheld+dt if forces[key]>target+tolerance else 0.
+            if self._overheld>.05:
+                self.failure='wrong_note_force'
+                return
+            down=down and abs(forces[key]-target)<=tolerance
         up = angles[key] <= self.release_angle
         if not self._armed:
             self._held = self._held + dt if down else 0.
@@ -69,5 +93,6 @@ class SingleKeyScore:
                 self.events.append(dict(kind='release', step=step, midi=key+21, repetition=self.count))
                 self._armed = False
                 self._held = self._released = 0.
+                self._overheld=0.
         else:
             self._released = 0.

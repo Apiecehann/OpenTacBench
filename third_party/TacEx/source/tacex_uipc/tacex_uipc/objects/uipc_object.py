@@ -229,12 +229,20 @@ class UipcObject(AssetBase):
 
             self.uipc_meshes.append(mesh)
 
-            # Set Vertex and Triangle data into USD mesh for rendering, skip
+            # USD/Fabric mesh points are local; UIPC supplies world vertices.
+            # Keep the original mesh transform rather than writing its derived
+            # worldMatrix cache (PhysX refreshes that cache before rendering).
+            render_points = tet_surf_points_world
+            if not self._is_line_mesh:
+                render_matrix = np.asarray(UsdGeom.XformCache().GetLocalToWorldTransform(usd_mesh.GetPrim()))
+                render_inverse = np.linalg.inv(render_matrix[:3, :3])
+                render_points = (render_points - render_matrix[3, :3]) @ render_inverse
+
+            # Set Vertex and Triangle data into USD mesh for rendering.
             MeshGenerator.update_usd_mesh(
-                prim=usd_mesh, surf_points=tet_surf_points_world, triangles=tet_surf_tri,
+                prim=usd_mesh, surf_points=render_points, triangles=tet_surf_tri,
                 replace_color=replace_color
             )
-
             # enable contact for uipc meshes etc.
             # mesh = self.uipc_meshes[0] #todo code properly cloned envs (i.e. for instanced objects?)
             self._create_constitutions(mesh)
@@ -250,16 +258,16 @@ class UipcObject(AssetBase):
             if not fabric_prim.HasAttribute("Deformable"):
                 fabric_prim.CreateAttribute("Deformable", usdrt.Sdf.ValueTypeNames.PrimTypeTag, True)
 
-            # extract world transform
-            rtxformable = usdrt.Rt.Xformable(fabric_prim)
-            rtxformable.CreateFabricHierarchyWorldMatrixAttr()
-            # set world matrix to identity matrix -> uipc already gives us vertices in world frame
-            rtxformable.GetFabricHierarchyWorldMatrixAttr().Set(usdrt.Gf.Matrix4d())
+            # Line renderers still supply world-space geometry directly.
+            if self._is_line_mesh:
+                rtxformable = usdrt.Rt.Xformable(fabric_prim)
+                rtxformable.CreateFabricHierarchyWorldMatrixAttr().Set(usdrt.Gf.Matrix4d())
 
-            # update fabric mesh with world coor. points
             render_offset = np.array(getattr(self.cfg.constitution_cfg, "render_offset", (0.0, 0.0, 0.0)))
-            fabric_mesh_points_attr = fabric_prim.GetAttribute("points")
-            fabric_mesh_points_attr.Set(usdrt.Vt.Vec3fArray(tet_surf_points_world + render_offset))
+            render_points = tet_surf_points_world + render_offset
+            if not self._is_line_mesh:
+                render_points = (render_points - render_matrix[3, :3]) @ render_inverse
+            fabric_prim.GetAttribute("points").Set(usdrt.Vt.Vec3fArray(render_points))
 
             self.fabric_prim = fabric_prim
 
@@ -398,7 +406,15 @@ class UipcObject(AssetBase):
         gvo = geo.meta().find(builtin.global_vertex_offset)
         # omni.log.info(f"global Vertex Offset: {gvo.view()}")
         global_vertex_offset = int(gvo.view()[0])
-        local_vertex_offset = self._uipc_sim._system_vertex_offsets[self._system_name][self.local_system_id - 1]
+        if self._system_name == "uipc::backend::cuda::FiniteElementMethod":
+            # FEM groups geometries by dimension/constitution during world.init;
+            # its storage order can differ from Python object creation order.
+            offset = geo.meta().find("backend_fem_vertex_offset")
+            if offset is None:
+                raise RuntimeError("FEM vertex writes require an initialized UIPC world")
+            local_vertex_offset = int(offset.view()[0])
+        else:
+            local_vertex_offset = self._uipc_sim._system_vertex_offsets[self._system_name][self.local_system_id - 1]
         # omni.log.info(f"system: {self._system_name}")
         # omni.log.info(f"local sys id: {self.local_system_id}")
         # omni.log.info(f"local vertex offset: {local_vertex_offset}")

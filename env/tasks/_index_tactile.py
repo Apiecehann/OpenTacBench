@@ -41,7 +41,7 @@ class IndexTactile:
         gel_contact,key_contact=contacts.create('index_gel'),contacts.create('keys')
         contacts.insert(gel_contact,key_contact,.6,1.e9)
         gel_contact.apply_to(self.sensor.gelpad.uipc_meshes[0])
-        low,high=min(task.cfg.melody)-2,max(task.cfg.melody)+2
+        low,high=min(60,min(task.cfg.melody))-2,max(71,max(task.cfg.melody))+2
         self.key_indices=[i for i,k in enumerate(task.layout) if not k.black and low<=k.midi<=high]
         self.keyboard=UipcKeyboard(self.scene,task.layout,self.key_indices,self.dt,key_contact)
 

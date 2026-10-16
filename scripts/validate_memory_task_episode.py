@@ -68,7 +68,8 @@ def validate_episode(path, expect=None):
         if expect and accepted != (expect == 'success'):
             errors.append('unexpected physical outcome')
         ticks = int(data['step'][-1])-int(data['phase'].attrs['policy_start_sim_step'])
-        if ticks > (1200 if task == 'blind_pick' else 3600)+1:
+        timeout=1200 if task=='blind_pick' else int(120*context.get('piano_timeout_seconds',30.))
+        if ticks > timeout+1:
             errors.append('policy timeout exceeded')
         if accepted and task == 'blind_pick':
             physical = meta.get('blind_pick_result', {})
@@ -87,16 +88,35 @@ def validate_episode(path, expect=None):
         if accepted and task == 'play_piano':
             physical = meta.get('piano_result', {})
             notes = physical.get('notes', [])
-            if not physical.get('tool_grasped') or physical.get('articulation') != 'short_light_first_alternating':
-                errors.append('tool or fixed articulation missing')
+            sequence=physical.get('sequence')
+            if not physical.get('tool_grasped'):
+                errors.append('tool acquisition missing')
+            if sequence is None and physical.get('articulation') != 'short_light_first_alternating':
+                errors.append('legacy articulation missing')
             if 'memory_ground_truth' in meta or 'cue_result' in meta:
                 errors.append('obsolete cue matching is still present')
-            if [note['key']+21 for note in notes] != [60,60,67,67,69]:
+            expected=sequence['midi'] if sequence else [60,60,67,67,69]
+            if [note['key']+21 for note in notes] != expected:
                 errors.append('incomplete or incorrect melody')
             for i, note in enumerate(notes):
-                long = i%2
-                if note['force_N'] != (3. if long else 1.5) or note['stable_seconds'] < (.6 if long else .2)-1e-9:
-                    errors.append('incorrect force or duration')
+                hold=sequence['hold_seconds'][i] if sequence else (.6 if i%2 else .2)
+                if note['stable_seconds'] < hold-1e-9:
+                    errors.append('incorrect note duration')
+                if sequence is None and note['force_N'] != (3. if i%2 else 1.5):
+                    errors.append('incorrect legacy force')
+            if sequence:
+                if 'piano' not in data:
+                    errors.append('missing piano timestep annotations')
+                else:
+                    labels=data['piano']
+                    if not np.array_equal(labels['physics_step'][:],data['step'][:]):
+                        errors.append('piano annotation step mismatch')
+                    if not np.allclose(labels['time_s'][:],data['step'][:]/120):
+                        errors.append('piano annotation time mismatch')
+                    force=labels['actual_force_N'][:]
+                    expected_dynamic=np.where(force<.1,0,np.where(force>=2.25,2,1))
+                    if not np.array_equal(labels['actual_dynamic'][:],expected_dynamic):
+                        errors.append('piano dynamics do not match measured force')
     return dict(valid=not errors, task=task, seed=seed, outcome=meta['result'],
                 policy_physics_ticks=ticks, frames=count, decoded_images=images, errors=errors)
 

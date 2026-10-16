@@ -1,4 +1,10 @@
 sensor_type: gsmini
+piano_notes: null  # e.g. [C#4, C4, G4, A4, E4, F4]; null samples six C4-B4 notes
+piano_note_count: 6
+piano_dynamics: null  # e.g. [light, heavy, light, heavy, light, heavy]
+piano_require_dynamics: false
+piano_wrong_key_policy: fail  # retry keeps the current target after a wrong key
+piano_hold_seconds: 0.12
 decimation: 1
 save_frequency: 2
 video_frequency: 2
@@ -8,7 +14,7 @@ save_pre_move: true
 tactile_video_key: rgb_marker
 observations:
   camera: [rgb]
-  tactile: [rgb, rgb_marker, depth, marker, pose]
+  tactile: [rgb_marker]
   embodiment: [joint, ee]
 save_dir: ./data
 start_seed: 0

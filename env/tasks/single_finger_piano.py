@@ -280,6 +280,8 @@ class Task(gym.Env):
             self.key_peak_forces = np.maximum(self.key_peak_forces, forces)
             self.max_key_depression = max(self.max_key_depression, float(angles[self.score.active_key]))
             self._check_hand_motion()
+            if hasattr(self,'piano_annotations'):
+                self.piano_annotations.update(self.step_count,self.cfg.physics_dt,self.score.count,forces)
             self.score.advance(angles, forces, self.cfg.physics_dt, self.step_count)
             self.audio_contacts.advance(self.step_count, self._audio_forces(angles, forces))
             if self.score.success or self.score.failure:

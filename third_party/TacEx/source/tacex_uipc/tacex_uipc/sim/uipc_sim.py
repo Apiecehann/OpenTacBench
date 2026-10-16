@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pathlib
 
+import numpy as np
+
 import omni.usd
 import usdrt
 import usdrt.Usd
@@ -320,6 +322,10 @@ class UipcSim:
         self.update_render_meshes()
 
     def update_render_meshes(self, dt=0):
+        if self.isaac_sim is not None:
+            # Flush the robot/Fabric transforms before converting UIPC world
+            # vertices to the local frame that Hydra uses for each mesh.
+            self.isaac_sim.forward()
         all_trimesh_points = self.sio.simplicial_surface(2).positions().view().reshape(-1, 3)
         # triangles = self.sio.simplicial_surface(2).triangles().topo().view()
         for i, fabric_prim in enumerate(self._fabric_meshes):
@@ -327,8 +333,14 @@ class UipcSim:
             if i < len(self._fabric_mesh_offsets):
                 trimesh_points = trimesh_points + self._fabric_mesh_offsets[i]
 
+            matrix = np.asarray(usdrt.Rt.Xformable(fabric_prim).GetFabricHierarchyWorldMatrixAttr().Get())
+            trimesh_points = (trimesh_points - matrix[3, :3]) @ np.linalg.inv(matrix[:3, :3])
             fabric_mesh_points = fabric_prim.GetAttribute("points")
             fabric_mesh_points.Set(usdrt.Vt.Vec3fArray(trimesh_points))
+            # Keep culling bounds with the deforming surface. The rest-pose
+            # extent can lie entirely outside a moving tactile camera.
+            extent = usdrt.UsdGeom.Mesh(fabric_prim).GetExtentAttr()
+            extent.Set(usdrt.Vt.Vec3fArray([trimesh_points.min(0), trimesh_points.max(0)]))
         for line_renderer in self._line_renderers:
             line_renderer.update_line_render_mesh()
         # NOTE: Currently there is a 1 frame delay between the points we set and what's rendered in Isaac

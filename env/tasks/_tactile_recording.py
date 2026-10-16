@@ -14,12 +14,17 @@ class TactileRecorder:
         self.file.attrs['metadata']=json.dumps(sensor.metadata())
         self.file.attrs['physics_dt_s']=task.cfg.physics_dt
         self.file.attrs['control_frequency_hz']=1/(task.cfg.physics_dt*task.cfg.action_repeat)
+        if hasattr(task,'sequence'):
+            self.file.attrs['piano_sequence']=json.dumps(task.sequence.as_dict())
+            self.file.attrs['piano_dynamic_codes']=json.dumps(dict(idle=0,light=1,heavy=2))
 
     def append(self,observation):
         arrays={'physics_step':np.asarray(self.task.step_count,dtype=np.int64),
                 'time_s':np.asarray(self.task.step_count*self.task.cfg.physics_dt),
                 'state':observation['state']}
         arrays['tactile/index/rgb']=observation['tactile']['index']['rgb']
+        if hasattr(self.task,'piano_annotations'):
+            arrays.update({'piano/'+k:np.asarray(v) for k,v in self.task._info()['piano'].items()})
         for name,value in arrays.items():
             value=np.asarray(value)
             if name not in self.datasets:

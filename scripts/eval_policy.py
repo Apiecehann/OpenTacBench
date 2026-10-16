@@ -603,6 +603,8 @@ def main():
     curr_time = time.strftime(r'%Y-%m-%d_%H:%M:%S')
 
     env_cfg:BaseTaskCfg = task_module.TaskCfg()
+    from envs._piano_sequence import configure_piano_task
+    configure_piano_task(env_cfg,task_config)
     env_cfg.save_dir = Path('eval_result') / policy_name / task_file_name / deploy_config_file.stem / curr_time
     eval_case_name = task_config.get("eval_case_name", None)
     if eval_case_name:

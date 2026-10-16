@@ -1,4 +1,4 @@
-"""One Shadow Hand index finger plays Twinkle on physical piano keys.
+"""One Shadow Hand index finger plays a note sequence on physical piano keys.
 
 The wrist rides on driven Y/Z slides. Other hand joints are welded, so lateral
 travel and lifting are continuous PhysX motion rather than root teleportation.
@@ -17,8 +17,9 @@ from isaaclab_assets import SHADOW_HAND_CFG
 from .single_finger_piano import Task as PianoTask, TaskCfg as PianoCfg
 from ._single_key_score import SingleKeyScore
 from ._twinkle import TWINKLE, HOLD_SECONDS
+from envs._piano_sequence import make_sequence,PianoAnnotations
 
-TASK_INSTRUCTION = 'Play the complete Twinkle Twinkle Little Star with the index finger; move and lift the wrist between keys.'
+TASK_INSTRUCTION = 'Play the requested notes with the index finger; move and lift the wrist between keys.'
 
 
 @dataclass
@@ -34,6 +35,13 @@ class TaskCfg(PianoCfg):
     tactile_sensor: str = 'gsmini'
     tactile_action_rates: tuple = (1., .375, 8.)  # Y m/s, Z m/s, index rad/s
     tactile_command_filter_seconds: float = .04
+    piano_notes: object = None
+    piano_dynamics: object = None
+    piano_note_count: int = 6
+    piano_require_dynamics: bool = False
+    piano_wrong_key_policy: str = 'fail'
+    piano_hold_seconds: object = None
+    piano_seed: int | None = None
 
     def __post_init__(self):
         if self.tactile_sensor not in ('gsmini','digit'):
@@ -42,7 +50,7 @@ class TaskCfg(PianoCfg):
             raise ValueError('Tactile image width must be 320 or 640')
         if self.tactile:
             rates=np.asarray(self.tactile_action_rates,dtype=float)
-            if (rates.shape!=(3,) or not np.isfinite(rates).all() or (rates<=0).any()
+            if (rates.shape not in ((3,),(4,)) or not np.isfinite(rates).all() or (rates<=0).any()
                     or not math.isfinite(self.tactile_command_filter_seconds)
                     or self.tactile_command_filter_seconds<=0):
                 raise ValueError('Tactile command rates and filter time must be finite and positive')
@@ -62,10 +70,14 @@ class Task(PianoTask):
     def __init__(self, cfg=None, render_mode=None):
         self.tactile = None
         self._last_action = None
-        super().__init__(cfg or TaskCfg(), render_mode)
+        cfg=cfg or TaskCfg()
+        self._sequence_request=cfg.piano_notes if cfg.piano_notes is not None else cfg.melody
+        self._set_sequence(cfg,np.random.default_rng(cfg.piano_seed))
+        super().__init__(cfg, render_mode)
         y_limits=(-.16,.10)
         if self.cfg.tactile:
-            centers=[self.layout[m-21].position[1]-.033 for m in self.cfg.melody]
+            workspace=set(self.cfg.melody)|{60,62,64,65,67,69,71}
+            centers=[self.layout[m-21].position[1]-.033 for m in workspace]
             y_limits=(min(centers)-.008,max(centers)+.008)
         self.action_space = gym.spaces.Box(np.array([y_limits[0],0.,0.],np.float32),
             np.array([y_limits[1],.05,self.cfg.press_joint_angle],np.float32))
@@ -86,9 +98,32 @@ class Task(PianoTask):
                 from ._index_tactile import IndexTactile
                 self.tactile = IndexTactile(self)
 
+    def _set_sequence(self,cfg,rng,options=None):
+        options=options or {}
+        notes=options.get('notes',self._sequence_request)
+        holds=options.get('hold_seconds',cfg.piano_hold_seconds)
+        if holds is None and notes is not None and tuple(notes)==TWINKLE: holds=HOLD_SECONDS
+        allow_black=hasattr(cfg,'arm_position') and (not cfg.tactile or cfg.tactile_sensor=='digit')
+        pool=tuple(m for m in range(60,72) if allow_black or m%12 not in (1,3,6,8,10))
+        self.sequence=make_sequence(notes,count=cfg.piano_note_count,
+            dynamics=options.get('dynamics',cfg.piano_dynamics),holds=holds,rng=rng,pool=pool)
+        if any(m%12 in (1,3,6,8,10) for m in self.sequence.midi):
+            if not hasattr(cfg,'arm_position') or (cfg.tactile and cfg.tactile_sensor!='digit'):
+                raise ValueError('Black-key sequences require the arm task with DIGIT or without tactile sensing')
+        if hasattr(cfg,'arm_position'):
+            from envs._piano import keyboard_layout
+            layout=keyboard_layout()
+            if any(not -.32<=layout[m-21].position[1]-.033<=.26 for m in self.sequence.midi):
+                raise ValueError('The requested notes exceed the arm task lateral workspace')
+        cfg.melody=self.sequence.midi
+        self.piano_annotations=PianoAnnotations(self.sequence,embodiment='hand')
+
     def _new_score(self):
-        holds = HOLD_SECONDS if self.cfg.melody == TWINKLE else tuple(.12 for _ in self.cfg.melody)
-        return SingleKeyScore(key_sequence=tuple(m-21 for m in self.cfg.melody), note_hold_seconds=holds)
+        labels=self.piano_annotations
+        return SingleKeyScore(key_sequence=tuple(m-21 for m in self.sequence.midi),
+            note_hold_seconds=self.sequence.holds,require_dynamics=self.cfg.piano_require_dynamics,
+            force_targets=tuple(labels.targets),force_tolerances=tuple(labels.tolerances),
+            wrong_key_policy=self.cfg.piano_wrong_key_policy)
 
     def _key_contact_cfg(self):
         cfg=super()._key_contact_cfg()
@@ -241,6 +276,13 @@ class Task(PianoTask):
         self._palm_quat=self.hand.data.body_quat_w[:,self._palm].clone()
 
     def reset(self, **kwargs):
+        seed=kwargs.get('seed',self.cfg.piano_seed)
+        self._sequence_seed=seed
+        self._set_sequence(self.cfg,np.random.default_rng(seed),kwargs.get('options'))
+        if self.tactile is not None and self.tactile.physics_backend=='uipc':
+            supported={self.layout[i].midi for i in self.tactile.key_indices}
+            if not set(self.sequence.midi)<=supported:
+                raise ValueError('The new notes exceed this Mini keyboard; construct a task with the wider note range')
         self._last_action=None
         self._audio_active=np.zeros(88,bool)
         self._audio_peaks=np.zeros(88)
@@ -295,20 +337,23 @@ class Task(PianoTask):
 
     def _filter_action(self, action):
         a=np.asarray(action,dtype=float)
-        if a.shape!=(3,) or not np.isfinite(a).all():
-            raise ValueError('Action must contain finite wrist Y (m), lift Z (m), and index flexion (rad)')
+        if a.shape!=self.action_space.shape or not np.isfinite(a).all():
+            raise ValueError(f'Action must contain {self.action_space.shape[0]} finite wrist/finger commands')
         a=np.clip(a,self.action_space.low,self.action_space.high)
         if self.cfg.tactile:
             # Position targets can otherwise command an impulsive lift/flex
             # combination that collapses a millimetre-scale soft gel.
             previous=(self._last_action if self._last_action is not None else
-                self._wrist_state())
+                self._action_state())
             alpha=1-math.exp(-self.cfg.physics_dt*self.cfg.action_repeat/self.cfg.tactile_command_filter_seconds)
             a=previous+alpha*(a-previous)
             delta=np.asarray(self.cfg.tactile_action_rates)*self.cfg.physics_dt*self.cfg.action_repeat
             a=np.clip(a,previous-delta,previous+delta)
             self._last_action=a.copy()
         return a
+
+    def _action_state(self):
+        return self._wrist_state()
 
     def _action_target(self, action):
         a=self._filter_action(action)
@@ -343,9 +388,18 @@ class Task(PianoTask):
 
     def _info(self):
         result=super()._info()
-        result.update(song='Twinkle Twinkle Little Star',notes_completed=self.score.count,
+        result.update(song='Twinkle Twinkle Little Star' if self.sequence.midi==TWINKLE else 'Custom piano sequence',notes_completed=self.score.count,
             total_notes=self.score.repetitions,hand_model='Shadow Hand',single_finger='index',
             wrist_motion='driven Y/Z slides',next_midi=None if self.score.success else self.score.active_key+21)
+        result['piano_sequence']=self.sequence.as_dict()
+        result['piano_instruction']=self.sequence.instruction()
+        result['require_dynamics']=self.cfg.piano_require_dynamics
+        result['piano_seed']=getattr(self,'_sequence_seed',self.cfg.piano_seed)
+        result['piano_dynamic_codes']=dict(idle=0,light=1,heavy=2)
+        result['wrong_key_policy']=self.cfg.piano_wrong_key_policy
+        result['mistakes']=self.score.mistakes
+        result['piano']=self.piano_annotations.records[-1] if self.piano_annotations.records else self.piano_annotations.update(
+            self.step_count,self.cfg.physics_dt,self.score.count,np.zeros(88))
         return result
 
     def demonstration_action(self, control='demo'):

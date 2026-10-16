@@ -25,6 +25,22 @@ class CameraManager:
 
     def add_camera(self, cam_cfg: CameraCfg):
         camera = TiledCamera(cam_cfg)
+        # Isaac Lab 2.3's Fabric pose reader expects Vec3d scales. Preserve
+        # the original transform values while normalizing float-authored USD.
+        import isaaclab.sim as sim_utils
+        from pxr import Gf, Sdf
+        for prim in sim_utils.find_matching_prims(cam_cfg.prim_path):
+            scale = prim.GetAttribute('xformOp:scale')
+            if scale and scale.GetTypeName() == Sdf.ValueTypeNames.Float3:
+                value = tuple(scale.Get())
+                layer = prim.GetStage().GetEditTarget().GetLayer()
+                spec = layer.GetAttributeAtPath(scale.GetPath())
+                if spec is None:
+                    spec = Sdf.AttributeSpec(Sdf.CreatePrimInLayer(layer, prim.GetPath()),
+                                             'xformOp:scale', Sdf.ValueTypeNames.Double3)
+                else:
+                    spec.typeName = Sdf.ValueTypeNames.Double3
+                scale.Set(Gf.Vec3d(*value))
         camera._initialize_impl()
         camera._is_initialized = True
         self.scene.sensors[f'camera_{cam_cfg.name}'] = camera

@@ -18,6 +18,8 @@ class TaskCfg(ShadowCfg):
     episode_seconds: float=180.
     action_repeat: int=8
     tactile_sensor: str='digit'
+    melody: tuple | None=None
+    tactile_action_rates: tuple=(1.,1.,.375,8.)
 
 
 class Task(ShadowTask):
@@ -26,7 +28,8 @@ class Task(ShadowTask):
         self.max_arm_tracking_error=0.
         self.max_press_trim=0.
         super().__init__(cfg or TaskCfg(),render_mode)
-        self.action_space.low[1]=-.0015
+        self.action_space=gym.spaces.Box(np.array([-.01,-.32,-.006,0.],np.float32),
+            np.array([.09,.26,.05,self.cfg.press_joint_angle],np.float32))
         state=gym.spaces.Box(-np.inf,np.inf,(111,),np.float32)
         if self.tactile is None:
             self.observation_space=state
@@ -139,7 +142,7 @@ class Task(ShadowTask):
         result=super().reset(**kwargs)
         self._demo_stage='travel'
         self._stage_start=0.
-        self._travel_from=float(self._wrist_state()[0])
+        self._travel_from=self._action_state()[:2].copy()
         return result
 
     def _wrist_state(self):
@@ -150,52 +153,62 @@ class Task(ShadowTask):
     def _action_target(self,action):
         return self._filter_action(action)
 
+    def _action_state(self):
+        x=float((self.hand.data.body_pos_w[0,self._palm]-self._initial_palm[0])[0])
+        return np.r_[x,self._wrist_state()]
+
     def demonstration_action(self,control='demo'):
-        if control!='demo': return super().demonstration_action(control)
+        if control!='demo': return np.r_[0.,super().demonstration_action(control)]
         now=self.step_count*self.cfg.physics_dt
         elapsed=now-self._stage_start
         stage=self._demo_stage
-        y=self.layout[self.cfg.melody[self._demo_note]-21].position[1]-.033
-        actual=self._wrist_state()
+        key=self.layout[self.cfg.melody[self._demo_note]-21]
+        x=.07 if key.black else 0.
+        y=key.position[1]-.033
+        height=.0155 if key.black else 0.
+        clearance=.04
+        actual=self._action_state()
         def smooth(value):
             v=float(np.clip(value,0.,1.)); return v*v*(3-2*v)
         def enter(next_stage):
             self._demo_stage=next_stage; self._stage_start=now
-        if elapsed>3.5:
+        if elapsed>6.:
             self.score.failure='wrist_tracking_timeout' if stage!='press' else 'press_timeout'
         if stage=='travel':
-            duration=max(.08,abs(y-self._travel_from)/.10)
-            command=self._travel_from+(y-self._travel_from)*smooth(elapsed/duration)
-            if elapsed>=duration and abs(actual[0]-y)<.0008 and abs(actual[1]-.03)<.001:
+            destination=np.array([x,y])
+            duration=max(.08,float(np.linalg.norm(destination-self._travel_from))/.10)
+            command=self._travel_from+(destination-self._travel_from)*smooth(elapsed/duration)
+            if elapsed>=duration and np.linalg.norm(actual[:2]-destination)<.0008 and abs(actual[2]-clearance)<.001:
                 self._press_trim=0.
                 enter('lower')
-            return np.array([command,.03,0.])
+            return np.r_[command,clearance,0.]
         if stage=='lower':
-            z=.03*(1-smooth(elapsed/.50))
-            if elapsed>=.65 and abs(actual[1])<.0005 and abs(actual[0]-y)<.001:
+            z=clearance+(height-clearance)*smooth(elapsed/.50)
+            if elapsed>=.65 and abs(actual[2]-height)<.0005 and np.linalg.norm(actual[:2]-[x,y])<.001:
                 enter('press')
-            return np.array([y,z,0.])
+            return np.array([x,y,z,0.])
         if stage=='press':
             amount=self.cfg.press_joint_angle*smooth(elapsed/.45)
-            if elapsed>.55 and not self.score._armed:
-                angle=float(self._key_state()[0][self.score.active_key])
+            force=float(self._key_state()[1][self.score.active_key])
+            target=float(self.piano_annotations.targets[self._demo_note])
+            if elapsed>.25:
                 dt=self.cfg.physics_dt*self.cfg.action_repeat
-                descent=min(.002,.20*max(0.,.032-angle))*dt
-                self._press_trim=max(-.0015,self._press_trim-descent)
+                self._press_trim=float(np.clip(self._press_trim+np.clip(.012*(force-target),-.003,.003)*dt,-.006,.004))
                 self.max_press_trim=max(self.max_press_trim,abs(self._press_trim))
-            hold=2. if self._demo_note%7==6 else 1.
-            if self.score._armed and elapsed>=hold: enter('release')
-            return np.array([y,self._press_trim,amount])
+            hold=max(1.,self.sequence.holds[self._demo_note]+.65)
+            matched=abs(force-target)<=self.piano_annotations.tolerances[self._demo_note]
+            if self.score._armed and matched and elapsed>=hold: enter('release')
+            return np.array([x,y,height+self._press_trim,amount])
         if stage=='release':
             amount=self.cfg.press_joint_angle*(1-smooth(elapsed/.30))
             if elapsed>=.35: enter('lift')
-            return np.array([y,self._press_trim,amount])
-        z=self._press_trim+(.03-self._press_trim)*smooth(elapsed/.50)
-        if elapsed>=.50 and self.score.count>self._demo_note and abs(actual[1]-.03)<.001:
+            return np.array([x,y,height+self._press_trim,amount])
+        z=height+self._press_trim+(clearance-height-self._press_trim)*smooth(elapsed/.50)
+        if elapsed>=.50 and self.score.count>self._demo_note and abs(actual[2]-clearance)<.001:
             self._demo_note=self.score.count
-            self._travel_from=float(actual[0])
+            self._travel_from=actual[:2].copy()
             enter('travel')
-        return np.array([y,z,0.])
+        return np.array([x,y,z,0.])
 
     def _physics_step(self,target):
         # Reset supplies joint positions; runtime actions specify Y/Z/index.
@@ -207,8 +220,9 @@ class Task(ShadowTask):
         jac=self.hand.root_physx_view.get_jacobians()[:,self._palm-1,:,self._arm_ids].clone()
         jac[:,:3]-=skew_symmetric_matrix(shift)@jac[:,3:]
         desired=self._initial_palm.clone()
-        desired[0,1]+=float(target[0]+.09175)
-        desired[0,2]+=float(target[1]-.03)
+        desired[0,0]+=float(target[0])
+        desired[0,1]+=float(target[1]+.09175)
+        desired[0,2]+=float(target[2]-.03)
         self._ik.set_command(torch.cat((desired,self._palm_quat),dim=-1))
         joints=self.hand.data.joint_pos[:,self._arm_ids]
         q_arm=self._ik.compute(position,quat,jac,joints)
@@ -220,7 +234,7 @@ class Task(ShadowTask):
         q_arm=torch.clip(joints+rate*delta,limits[...,0],limits[...,1])
         q=self._rest.clone()
         q[:,self._arm_ids]=q_arm
-        q[0,self._index]=float(target[2])
+        q[0,self._index]=float(target[3])
         self.max_arm_tracking_error=max(self.max_arm_tracking_error,float(torch.linalg.vector_norm(position-desired)))
         super()._physics_step(q)
         self._arm_joint_peak=torch.maximum(self._arm_joint_peak,

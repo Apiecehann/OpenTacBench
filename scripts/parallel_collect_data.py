@@ -69,6 +69,8 @@ def worker_run(task_config, task_file_name, base_save_dir: Path, seed_q: Queue,
         task_module = importlib.import_module(f"envs.{task_file_name}")
 
         env_cfg: 'BaseTaskCfg' = task_module.TaskCfg()
+        from envs._piano_sequence import configure_piano_task
+        configure_piano_task(env_cfg,task_config)
         worker_id = current_process().name.split('-')[-1]
         env_cfg.save_dir = base_save_dir
         if "background" in task_config:

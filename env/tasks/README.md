@@ -1,8 +1,9 @@
-# Single-finger piano: Shadow Hand and Twinkle Twinkle Little Star
+# Piano note sequences: tapping tool and dexterous hand
 
 The default task is `arm_shadow_piano.Task`: a Franka Panda carries a five-finger
-Shadow Hand and plays the complete 42-note melody of **Twinkle Twinkle Little
-Star**, in C major. Only the
+Shadow Hand and plays a supplied sequence, or six random C4–B4 notes when no
+sequence is supplied. **Twinkle Twinkle Little Star** remains available with
+`--song twinkle`. Only the
 index finger flexes. All other hand joints are welded; seven driven Panda
 joints lift and translate the wrist through Isaac Lab's differential IK
 controller. The hand follows continuous PhysX motion. The task never teleports
@@ -18,18 +19,21 @@ Use the standalone Isaac Sim installation's `python.sh` in place of `python`
 when appropriate. The implementation targets Isaac Sim 5.1 / Isaac Lab 2.3.2.
 Omit `--headless` to open the viewer. The default outputs are
 `data/arm_shadow_piano/video.mp4`, `video.wav` and `result.json`.
-`--notes 3 --output data/arm_shadow_piano/smoke` plays only C4 C4 G4 for a smoke run;
-omit `--notes` for the entire song.
+`--notes 3 --seed 0` requests three reproducible random notes.
+`--song twinkle --notes 3` plays C4 C4 G4; `--song twinkle` plays all 42 notes.
 `--wrist rail` selects the previous standalone Shadow Hand on Y/Z slides.
 
-The Shadow task's Gymnasium action is `(wrist_y_m, lift_z_m, index_flexion_rad)`.
+The arm action is `(wrist_x_offset_m, wrist_y_m, lift_z_m, index_flexion_rad)`.
+The X offset is relative to the reset palm and reaches the black-key row.
+The rail retains `(wrist_y_m, lift_z_m, index_flexion_rad)`.
 The arm variant has 111 state values, including all seven arm joint positions
 and velocities. The rail variant retains its 97 values. Both include wrist/finger
 positions and velocities, all 88 key
 angles, completed-note fraction, press/release state and next pitch. Each note
 must physically depress its key with measured contact force and then release
-it. Wrong keys fail the episode; repeated pitches require separate releases.
-Phrase-ending notes require longer holds. Sound comes from measured key
+it. Wrong keys fail by default; `--wrong-key-policy retry` permits another
+attempt at the current note. Repeated pitches require separate releases.
+The Twinkle preset retains longer phrase-ending holds. Sound comes from measured key
 contacts and uses the shared piano synthesizer; no melody audio is prerecorded.
 The hand connects to `panda_link7` by a fixed joint at the Panda flange. Initial
 arm geometry and joint angles agree through Isaac Sim's Lula solver. Playing
@@ -42,14 +46,82 @@ The index motor uses 6 N m/rad stiffness, 0.20 N m s/rad damping and the existin
 retains its original dimensions and optical settings. Musical scoring uses the
 same thresholds. IK increments are scaled together to preserve
 their Cartesian direction when motor rates are limited.
-A wrist trim bounded to 1.5 mm uses measured key travel to maintain the same
-press criterion across arm poses; it never changes the scoring thresholds.
+The arm demonstrator uses measured force to adjust wrist height toward the
+requested dynamic, bounded to 6 mm down and 4 mm up. Policies still command
+wrist/finger targets directly; scoring uses the measured result.
 
 The hand uses a dark forearm, satin metal finger links, a pale palm shell and
 dark fingertip pads. Its articulated/collision geometry comes from Isaac Lab's
 Shadow Hand asset. Materials change the appearance; motion and scoring use the
 same physical model. The asset downloads from NVIDIA on first launch.
 `--hand-usd` may select a local copy of the same hand model.
+
+## Shared prompts, scoring and timestep labels
+
+These additions apply to `envs/play_piano.py` (Franka and tapping tool) and
+`env/tasks/arm_shadow_piano.py` (Franka and Shadow index).
+
+```bash
+# The user's example, with default pitch-order scoring:
+bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --sequence "C# C G A E F" --dynamics "light heavy light heavy light heavy"
+# Also require the measured force band for each note:
+bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --sequence "C#4 C4 G4 A4 E4 F4" --dynamics "light heavy light heavy light heavy" --judge-dynamics
+# No prompt: six random notes; a seed makes the prompt reproducible:
+bash scripts/run_piano_tactile.sh --headless --video --image-width 320 --seed 0
+```
+
+Notes accept names with sharps/flats or MIDI integers. An omitted octave means
+4, so `C#` is C#4. For the tool task set `piano_notes`, `piano_dynamics`,
+`piano_note_count`, `piano_require_dynamics`, `piano_wrong_key_policy` and
+`piano_hold_seconds` in
+[`task_config/play_piano.yml`](../../task_config/play_piano.yml), then use the
+existing collector/evaluator. The shared wrapper selects the gripper collector
+with a leading `gripper` argument and accepts an optional YAML path:
+
+```bash
+bash scripts/run_piano_tactile.sh gripper --headless --episode_num 1
+bash scripts/run_piano_tactile.sh gripper --config path/to/piano.yml --headless
+```
+
+The gripper also needs the benchmark's cuRobo motion-planning dependency
+(see [installation](../../docs/Installation.md)). Its default YAML saves only
+`rgb_marker` tactile images; depth remains internal to adaptive grasping.
+All serial/parallel collection/evaluation entries
+apply these piano-only settings. Both tasks also accept
+`reset(options={"notes": ["C#4", "C4"], "dynamics": ["light", "heavy"]})`.
+
+Default success requires pitches in order, physical contact, a minimum hold
+and separate releases. Light/heavy does not affect default success. Strict
+dynamics is optional. Duration is independent of dynamics; `--hold-seconds`
+or `piano_hold_seconds` changes it. The tool task additionally requires tool
+acquisition and rejects physical overload. Its policy still submits END through
+the existing interface.
+
+Every physics step has `physics_step`, `time_s`, `target_index`, `target_midi`,
+`target_dynamic`, `target_force_N`, `actual_midi`, `actual_dynamic`,
+`actual_force_N`, `heavy_threshold_N` and `contact`. Codes are **0 idle,
+1 light, 2 heavy**; no-contact pitch is -1. Targets refer to the note being
+evaluated during that tick, including its release tick. Actual labels use
+measured force on the key actually touched, including wrong keys.
+
+The hand exposes labels in Gym `info["piano"]`, per-physics-step
+`piano_steps.jsonl`, and a `piano/` group aligned with recorded `tactile.h5`
+frames. The tool adds the same fields under observation `piano`, saves them in
+normal HDF5, and writes `piano_steps/<seed>.jsonl` under its collection root.
+Episode context stores the complete prompt. Observer videos display target and
+actual labels; raw tactile RGB is preserved.
+The tool task uses `decimation: 1` so each annotated step is one 120 Hz physics
+tick. The hand records every 240 Hz physics tick and samples tactile frames at
+its control rate (30 Hz for the arm default).
+
+These are task force bands, not hardware calibration or MIDI velocity. The
+tool targets 1.5 N / 3 N with ±0.45 N tolerance. The hand targets 0.35 N / 0.50 N
+with ±0.07 N tolerance on white keys; black-key values are doubled for the
+shorter spring lever. Actual light/heavy thresholds are 2.25 N for the tool,
+0.425 N for a white key under the hand and 0.85 N for a black key.
+Black-key hand sequences use the arm with DIGIT or without tactile sensing.
+The legacy Mini/UIPC and rail variants retain white-key operation. The arm
+rejects notes outside its lateral workspace before running.
 
 ## Integrated DIGIT index tip
 
@@ -87,14 +159,25 @@ and `result.json`. The observation contract remains 111 state values plus
 `tactile/index/rgb`, with one index sensor and no depth/deformation outputs.
 `--camera-view fingertip` changes only the observer camera.
 
-The 320 × 240 headless demonstration passed all 42 notes and produced 42
-matching contact-triggered sounds in 124.37 simulated seconds, with 3731 RGB
-frames at 30 Hz. Its recordings are in `data/arm_shadow_piano_digit/full`;
-the three-note close-up is in `data/arm_shadow_piano_digit/preview`.
-Native contact-point inspection confirmed contact near the gel centre after
-correcting the mount angle. Recorded RGB responds to those contacts, and the
-640 × 480 renderer output also passed a contact/no-contact check.
-The retained Mini/UIPC backend passed a separate one-note regression.
+The six-note C#4 C4 G4 A4 E4 F4 demonstration passed with strict dynamics,
+black/white key travel and six matching physical audio events: 5942 physics
+ticks, 743 aligned tactile frames and 24.758 simulated seconds. The default
+random seed-0 run also passed all six notes, including consecutive D#4 strokes:
+A#4 G4 F#4 D#4 D#4 C4, 4829 ticks and 604 tactile frames. Every saved label was
+checked against the full physics trace and measured-force classification.
+Recordings are in `data/piano_sequences/hand_strict` and `hand_random`.
+The gripper/tool run passed the same six-note prompt on seed 7: 1598 policy
+physics ticks, 821 saved frames and six matching contact-driven audio events.
+The standard episode validator decoded 4926 RGB frames and passed all timing,
+terminal-verdict and measured-force-label checks. Its video, HDF5, metadata and
+per-tick JSONL are in `data/piano_sequences/tool`.
+The regular collector also passed seeds 8 and 9 in one process, including
+reset and two separately released C4 strokes with strict light/heavy judging:
+690/680 policy ticks and 368/362 saved frames. Both RGB-only episodes passed
+the standard validator and complete JSONL/HDF5/audio alignment checks. These
+outputs are in `data/piano_sequences/tool_repeat`.
+The earlier Twinkle reference recording
+remains in `data/arm_shadow_piano_digit/full`.
 
 ## Original index-only calibrated GelSight Mini
 

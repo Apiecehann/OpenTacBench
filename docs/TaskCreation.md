@@ -272,15 +272,19 @@ On fresh-process seeds 0, 1, and 2, complete retrieval passed in 841, 1148, and 
 
 ## Piano articulation (`play_piano`)
 
-The standalone [Shadow Hand task](../env/tasks/shadow_piano.py) plays all 42
-notes of *Twinkle Twinkle Little Star* with one index finger, using physical
-Y/Z wrist slides to move between keys. The original fixed-palm Allegro
-repeated-key task is also available. See the [launcher and task interfaces](../env/tasks/README.md).
-These standalone tasks use PhysX rather than the arm/gripper collector.
+The standalone [arm and Shadow Hand task](../env/tasks/arm_shadow_piano.py)
+and the tapping-tool task both accept an ordered note prompt. Without one,
+they sample six C4–B4 notes, including black keys; an explicit seed reproduces
+the sequence. Pitch names accept sharps/flats and optional octaves (default 4).
+The hand's `--song twinkle` preset retains all 42 notes. The arm moves in X/Y/Z
+to reach both rows; the older rail and fixed-palm variants remain available.
+See [prompts, interfaces and timestep labels](../env/tasks/README.md).
 
-The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The existing arm and tactile gripper pick up a tapping tool and play C4 C4 G4 G4 A4, the first five notes of *Twinkle, Twinkle, Little Star*. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces. The tool has a rounded dark teal grip, brass ferrule and cap, satin steel shaft, and ivory-coloured compliant tip. Its detailed visible surface is also its deforming FEM contact surface, with a 26 mm grip, 7.8 mm tip, and 108 mm overall length. Static box panels and piano supports are also exactly fixed so collision geometry stays aligned with the visual shells under gravity. Both key motion and fingertip reactions are simulated through UIPC contact.
+The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The arm and tactile gripper pick up a tapping tool and play the requested sequence. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces. The tool has a rounded dark teal grip, brass ferrule and cap, satin steel shaft, and ivory-coloured compliant tip. Its detailed visible surface is also its deforming FEM contact surface, with a 26 mm grip, 7.8 mm tip, and 108 mm overall length. Static box panels and piano supports are exactly fixed. The tool task solves key motion and fingertip reactions through UIPC contact; the hand's DIGIT backend uses PhysX contacts and the original TACTO renderer.
 
-The robot directly picks up the tapping tool and plays the fixed phrase. There is no tactile reference, cue-matching action, or randomized articulation label. Notes alternate short-light and long-firm, starting short-light: 1.5 ± 0.45 N for 0.20 s, then 3.0 ± 0.45 N for 0.60 s. Scoring uses physical key contact loads at every 120 Hz physics tick, including wrong-key presses, overload, early release, and late release. Success also requires acquisition of the tapping tool.
+Default success checks the requested pitch order, contact, minimum hold and separate release. Light/heavy is annotated independently; `piano_require_dynamics: true` also requires the measured force band. The tool targets 1.5 ± 0.45 N for light and 3.0 ± 0.45 N for heavy; hold duration is separate, defaulting to 0.12 s. `piano_wrong_key_policy` selects immediate failure or retry at the current note. The tool retains its overload check and acquisition requirement. Configure the prompt through `piano_notes` and related settings in `task_config/play_piano.yml` or through reset options.
+
+Both tasks record separate target and actual dynamics every physics step (0 idle, 1 light, 2 heavy), with note indices, measured force and a simulation timestamp. The tool exposes numeric observation fields under `piano`; the hand uses Gym `info["piano"]`. Recorded HDF5 frames carry aligned `piano/` fields, and JSONL traces retain every physics tick. Video annotations affect the observer view, preserving raw tactile RGB. These fields and overrides apply only to the two piano tasks.
 
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
@@ -288,7 +292,21 @@ Both head and wrist cameras show the scene without a cue mask. Policy observatio
 
 Recorded videos include a synthesized piano soundtrack and a companion WAV. All 88 physical key contacts can trigger sound, including wrong keys; the renderer does not read the intended melody or successful-note labels. Contact onset/release determines timing, the actual peak contact force controls amplitude/brightness, and the physical key index determines pitch. Physical event steps are mapped to actual recorded frames, including the policy boundary. Sound uses decaying, slightly detuned partials and a release envelope; it is an audible presentation of the contact events, not a simulation of strings or room acoustics. Audio is generated at episode finalization, so headless collection produces playable sound without requiring an audio device.
 
-The detailed-tool, five-note version passed seeds 0 and 1 consecutively in the regular collector, including reset between episodes, in 1334 and 1356 physics ticks. Means were 1345 total ticks, 1267 policy ticks, and 632.5 saved policy observations. Total recorded/video frames were 650 and 662 (mean 656) at 60 Hz. Both episodes passed raw-data validation, contained five physical note events in the correct order, and produced fully decoded H.264 videos with AAC soundtracks (48 kHz). WAV spectral peaks matched C4/C4/G4/G4/A4, with separate releases between repeated notes. These are finite scripted demonstrations, not trained-policy results.
+The earlier fixed five-note tool recording passed seeds 0 and 1 in the regular collector, including reset, in 1334 and 1356 physics ticks. Those recordings remain reference results for the original phrase. The configurable hand task passed the C#4/C4/G4/A4/E4/F4 prompt with strict dynamics (5942 ticks, 743 tactile frames), and the default random seed-0 six-note prompt (4829 ticks, 604 frames). Per-tick labels, HDF5 alignment, measured-force classes and physical audio pitches were checked. The configurable tool task passed the same six-note prompt on seed 7, with 1598 policy ticks, 821 saved frames and six matching physical audio events. The standard episode validator passed after decoding all 4926 saved RGB images; outputs are in `data/piano_sequences/tool`. The regular collector also passed seeds 8 and 9 in the same process, including reset, with strict light/heavy judging on two separately released C4 strokes: 690/680 policy ticks and 368/362 saved frames. Both episodes passed RGB-only image/schema validation and JSONL/HDF5/audio alignment checks (`data/piano_sequences/tool_repeat`). These are scripted demonstrations, not trained-policy results.
+
+The Isaac Sim 5.1 / Isaac Lab 2.3.2 gripper path reuses the original Mini
+factory, optical calibration, FEM pad and adaptive-grasp API. Reset synchronizes
+the gel vertices and original attachment targets with the robot pose before the
+first solve. FEM writes use UIPC's `backend_fem_vertex_offset`, because native
+storage is grouped by geometry dimension/constitution and can differ from Python
+creation order. Rendering converts UIPC world vertices into each mesh's current
+Fabric local frame after `SimulationContext.forward()` and updates local bounds.
+This avoids the extra transform that PhysX applies when refreshing a cached
+`worldMatrix`. The original gel visibility flag is retained: the optical camera
+measures contacting objects through the gel. The observer-camera adapter also
+preserves scale values while normalizing float-authored scales to Vec3d for
+Isaac Lab's pose reader. The shared wrapper's `gripper` selector calls the regular
+collector, whose app arguments are now registered before parsing.
 
 Development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The final controller uses the three-sample median described above while retaining the original 0.01 m/s solver tolerance and all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
 
