@@ -381,6 +381,24 @@ each subsequent upload includes remote manifest readback. Completed
 episodes can be resumed with the same source hashes and output path;
 interrupted attempts are preserved for inspection.
 
+Audit collected recordings and publish a dataset index with:
+
+```bash
+python scripts/audit_tactile_memory.py --tasks tension_strap
+python scripts/publish_tactile_dataset.py --repo-id OWNER/DATASET --publish
+```
+
+The auditor decodes every RGB frame and checks frame counts, numeric
+finiteness and nonempty image streams. It reuses an audit only while the
+recording size, modification timestamp and audit implementation remain
+unchanged. Add `--watch` to audit alongside collection until the selected
+tasks each have 50 validated and uploaded episodes. Without `--tasks`, it
+watches the strap and both piano datasets. The catalog includes only
+episodes that pass collection validation, upload readback and this image
+audit; `_checks/` upload tests do not count toward the requested totals.
+Publishing checks both remote index files against their exact local hashes,
+allowing brief branch-cache propagation after updates.
+
 Bulb submission still requires 180 stationary physics ticks, while physical
 success requires at least 132 stable ticks; changing `policy_hold_steps`
 alone does not shorten the stationary submission gate.

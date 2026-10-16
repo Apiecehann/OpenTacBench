@@ -108,3 +108,18 @@ def test_catalog_readback_waits_for_new_content_and_retains_exact_hash(tmp_path,
     assert calls==[expected]*3 and waits==[2,5]
     assert source.read_bytes()==b'current verified counts'
     assert not (tmp_path/'downloaded.md').exists()
+
+
+def test_audit_queue_reuses_unchanged_recordings_and_checks_requested_count(tmp_path,monkeypatch):
+    import scripts.audit_tactile_memory as auditor
+    folder=tmp_path/'tension_strap/dataset/episodes/0000'
+    (folder/'hdf5').mkdir(parents=True)
+    make_recording(folder/'hdf5/0.hdf5')
+    (folder.parents[1]/'progress.json').write_text(json.dumps(dict(status='complete',
+        collected=1,uploaded=1,attempts=[dict(seed=0,path=str(folder),accepted=True)])))
+    state={'episodes':{}}
+    assert not auditor.scan(tmp_path,['tension_strap'],state,50,lambda:None)
+    assert state['counts']['tension_strap']==1
+    assert state['decoded_images']==2
+    monkeypatch.setattr(auditor,'audit_recording',lambda path:pytest.fail('unchanged file was re-audited'))
+    assert auditor.scan(tmp_path,['tension_strap'],state,1,lambda:None)
