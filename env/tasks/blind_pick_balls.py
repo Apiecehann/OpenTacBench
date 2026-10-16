@@ -4,7 +4,7 @@ Import after AppLauncher. PhysX drives the Franka; bundled UIPC solves both
 GelSight pads, all material balls and the container. Scene cameras are for
 recording only and are never included in the policy observation.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
 from pathlib import Path
 import gymnasium as gym
 import numpy as np
@@ -19,12 +19,14 @@ from tacex_assets.robots.franka.franka_gsmini_gripper_uipc_high_res import (
     FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_HIGH_RES_UIPC_CFG as FRANKA_GSMINI_CFG,
 )
 from tacex_uipc import UipcInteractiveScene,UipcObject,UipcObjectCfg,UipcSim,UipcSimCfg
+from tacex.simulation_approaches.fem_based.sim.gelpad_info import SURFACE_FACES
 from envs.sensors.tactile import VisualTactileSensor,create_gelsight_mini_cfg
 from envs._tactile_memory import box_mesh
 from envs._force_task_utils import tetra_faces,write_tet_asset
 from ._blind_ball_models import (
-    CLASSES,FLOOR_Z,RIM_Z,BOWL_CENTER,BOWL_RADIUS,PickScore,
-    ball_mesh,sample_scene,scan_points,surface_roughness,classify_touch,sphere_center_xy,
+    CLASSES,FLOOR_Z,RIM_Z,BOWL_CENTER,BOWL_RADIUS,BALL_RADIUS,
+    BOX_CENTER,BOX_SIZE,WALL_THICKNESS,DEFAULT_PROFILES,PickScore,
+    ball_mesh,sample_scene,scan_points,surface_roughness,classify_touch,sphere_center_xy,pad_front_contacts,
 )
 
 
@@ -34,12 +36,13 @@ TASK_INSTRUCTION='Find the {target} ball using touch alone, then lift it clear o
 @dataclass
 class TaskCfg:
     device: str='cuda:0'
-    ball_count: int=6
+    ball_count: int=12
+    material_profiles: tuple=DEFAULT_PROFILES
     target_class: str='textured'
     seed: int=0
     physics_dt: float=1/120
     action_repeat: int=2
-    episode_seconds: float=150.
+    episode_seconds: float=240.
     workspace: str='.cache/blind_pick_balls/world'
     image_shape: tuple=(480,640)
     robot_usd: str|None=None
@@ -56,6 +59,7 @@ class _BallWorld:
         self.force=np.zeros((2,3))
         self.patches=[None,None]
         self.depths=[None,None]
+        self.surface_vertices=np.unique(SURFACE_FACES['gsmini'])
         self.initial_centers=np.array(centers,copy=True)
         self._cache=None
         self.uipc=UipcSim(UipcSimCfg(dt=self.dt,workspace=task.cfg.workspace,
@@ -108,12 +112,13 @@ class _BallWorld:
         resistance=self.uipc.cfg.contact.default_contact_resistance*1.e9
         contacts.insert(fixture_contact,contacts.default_element(),.45,resistance)
         contacts.insert(fixture_contact,self.gel_contact,.45,resistance)
-        parts=[('floor',(.40,.50,.016),(.51,0,0)),
-            ('front',(.012,.50,RIM_Z-FLOOR_Z),(.316,0,FLOOR_Z)),
-            ('back',(.012,.50,RIM_Z-FLOOR_Z),(.704,0,FLOOR_Z)),
-            ('left',(.376,.012,RIM_Z-FLOOR_Z),(.51,-.244,FLOOR_Z)),
-            ('right',(.376,.012,RIM_Z-FLOOR_Z),(.51,.244,FLOOR_Z)),
-            ('bowl_floor',(.16,.16,.016),(*BOWL_CENTER,0))]
+        x,y=BOX_CENTER; width,length=BOX_SIZE; t=WALL_THICKNESS
+        parts=[('floor',(width,length,FLOOR_Z),(x,y,0)),
+            ('front',(t,length,RIM_Z-FLOOR_Z),(x-(width-t)/2,y,FLOOR_Z)),
+            ('back',(t,length,RIM_Z-FLOOR_Z),(x+(width-t)/2,y,FLOOR_Z)),
+            ('left',(width-2*t,t,RIM_Z-FLOOR_Z),(x,y-(length-t)/2,FLOOR_Z)),
+            ('right',(width-2*t,t,RIM_Z-FLOOR_Z),(x,y+(length-t)/2,FLOOR_Z)),
+            ('bowl_floor',(.16,.16,FLOOR_Z),(*BOWL_CENTER,0))]
         for i,angle in enumerate(np.arange(20)*2*np.pi/20):
             center=BOWL_CENTER+.079*np.array([np.cos(angle),np.sin(angle)])
             parts.append(('bowl_rim_'+str(i),(.012,.030,.035),(*center,FLOOR_Z)))
@@ -165,7 +170,7 @@ class _BallWorld:
             pad=sensor.gelpad
             start=int(pad.geo_slot_list[0].geometry().meta().find('global_vertex_offset').view()[0])
             points=pad.vertex_positions
-            mask=(indices>=start)&(indices<start+len(points))
+            mask=pad_front_contacts(indices,forces,start,self.surface_vertices,self.opening_axis(i))
             weights=np.linalg.norm(forces[mask],axis=1)
             self.force[i]=forces[mask].sum(axis=0)
             if weights.sum()>.03:
@@ -196,9 +201,9 @@ class Task(gym.Env):
     tcp_offset=(0.,0.,.131)
 
     def __init__(self,cfg=None,render_mode=None):
-        self.cfg=cfg or TaskCfg()
-        if self.cfg.ball_count not in range(2,10) or self.cfg.target_class not in CLASSES:
-            raise ValueError('Use 2 to 9 balls and hard/soft/textured as target')
+        self.cfg=replace(cfg or TaskCfg())
+        self.materials,self._initial_centers=sample_scene(np.random.default_rng(
+            self.cfg.seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles)
         self.render_mode=render_mode
         self.camera=None
         self.physics=None
@@ -211,6 +216,7 @@ class Task(gym.Env):
         self.stage=omni.usd.get_context().get_stage()
         from envs._scene import scene_light_cfg,scene_plate_cfg,resolve_scene_background_texture
         plate,light=scene_plate_cfg('/World/Table'),scene_light_cfg('/World/Light')
+        plate.spawn.scale=(1.35,1.35,1.)
         plate.spawn.func(plate.prim_path,plate.spawn,translation=plate.init_state.pos)
         light.spawn.texture_file=str(resolve_scene_background_texture('base5'))
         light.spawn.func(light.prim_path,light.spawn)
@@ -224,8 +230,6 @@ class Task(gym.Env):
         self.robot=Articulation(cfg)
         self.scene=UipcInteractiveScene(InteractiveSceneCfg(num_envs=1,env_spacing=1.5))
         self.scene.articulations['robot']=self.robot
-        self.materials,self._initial_centers=sample_scene(np.random.default_rng(
-            self.cfg.seed),self.cfg.ball_count,self.cfg.target_class)
         self.physics=_BallWorld(self,self.materials,self._initial_centers)
         if self.cfg.record_video:
             from isaaclab.sensors import Camera,CameraCfg
@@ -266,8 +270,12 @@ class Task(gym.Env):
 
     def reset(self,*,seed=None,options=None):
         super().reset(seed=seed)
+        target=(options or {}).get('target_class',self.cfg.target_class)
+        if target not in {m.kind for m in self.materials}:
+            raise ValueError('Target class must be present in this scene')
+        self.cfg.target_class=target
         _,self._initial_centers=sample_scene(np.random.default_rng(
-            self.cfg.seed if seed is None else seed),self.cfg.ball_count,self.cfg.target_class)
+            self.cfg.seed if seed is None else seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles)
         self.physics.reset(self._initial_centers)
         self.robot.write_joint_state_to_sim(self._rest,torch.zeros_like(self._rest))
         self.robot.set_joint_position_target(self._rest)
@@ -412,30 +420,33 @@ class Task(gym.Env):
 
     def _squeeze(self,load):
         samples=[]
-        latched=None
         for _ in range(320):
             if self._done: return None
             loads=self._loads()
             if loads.min()<.1 and loads.max()>8.:
                 return None
             measured=float(self.robot.data.joint_pos[0,self.finger_ids].mean())
-            if latched is None and loads.min()>=load:
-                # Cancel drive lag at the measured opening before settling.
-                latched=measured
-            if latched is not None:
-                q=latched
+            # Keep regulating during settling. Freezing a jaw target on the
+            # first threshold crossing loses contact as larger soft balls relax.
+            if loads.min()>=load*.85 and loads.max()<=load*1.8:
                 samples.append((measured,float(loads.mean())))
-                if len(samples)>=12:
-                    if loads.min()>load*.5: return np.median(samples[-8:],axis=0)
-                    samples=[]; latched=None
+                if len(samples)>=12: return np.median(samples[-8:],axis=0)
             else:
-                q=measured-.00006 if loads.max()>.05 else self._opening-.00015
-                if q<=.008: return None
+                samples=[]
+            delta=float(np.clip((load-loads.min())*.00002,-.00004,.00006))
+            if loads.max()<.05: delta=.00015
+            elif loads.min()<.08: delta=.00010
+            # Integrate the target: tiny per-measured-position commands can
+            # remain inside the finger drive's friction/tracking deadband.
+            q=self._opening-delta
+            if q<=.008: return None
             # During unilateral touch preserve the first loaded jaw's position.
             goal=self._goal.copy()
             if (loads>.08).sum()==1:
                 i=int(np.argmax(loads))
-                goal+=self.physics.opening_axis(i)*(measured-q)
+                goal+=self.physics.opening_axis(i)*delta
+            elif loads.min()>.08 and np.ptp(loads)>load*.3:
+                goal+=self.physics.opening_axis(int(np.argmax(loads)))*min(.00004,np.ptp(loads)*.00002)
             self.step(np.r_[goal,q])
         return None
 
@@ -465,9 +476,11 @@ class Task(gym.Env):
             if above:
                 if not self._go(np.r_[point[:2],RIM_Z+.10],opening=.04): break
                 above=False
-            if not self._go(point,opening=.04,sense=True): break
+            # A fully open Mini gripper can straddle these balls without any
+            # pad contact. Search with a narrower gap, then reopen to center.
+            if not self._go(point,opening=.024,sense=True): break
             xy=self._locate()
-            invalid=(xy is None or not (.41<xy[0]<.645 and abs(xy[1])<.18)
+            invalid=(xy is None or not (.395<xy[0]<.63 and abs(xy[1])<.175)
                 or any(np.linalg.norm(xy-old)<.04 for old in rejected))
             if invalid:
                 if self._loads().max()>.07:
@@ -477,7 +490,7 @@ class Task(gym.Env):
             touch_goal=self._goal.copy()
             if not self._go(np.r_[touch_goal[:2],RIM_Z+.10],opening=.04): break
             if not self._go(np.r_[xy,RIM_Z+.10],opening=.04): break
-            if not self._go(np.r_[xy,FLOOR_Z+.025],opening=.04): break
+            if not self._go(np.r_[xy,FLOOR_Z+BALL_RADIUS],opening=.04): break
             kind=self._probe()
             if kind==self.cfg.target_class:
                 if not self._go(np.r_[self._goal[:2],RIM_Z+.10],hold=True): break
@@ -506,6 +519,8 @@ class Task(gym.Env):
 
     def diagnostics(self):
         return dict(self._info(),target_class=self.cfg.target_class,ball_count=len(self.materials),
+            ball_radius_m=BALL_RADIUS,box_size_m=BOX_SIZE.tolist(),box_rim_z_m=RIM_Z,
+            material_profiles=list(self.cfg.material_profiles),table_scale=[1.35,1.35,1.],
             materials=[dict(name=m.name,kind=m.kind,youngs_modulus_Pa=m.youngs_modulus,texture=m.texture) for m in self.materials],
             initial_centers_m=self._initial_centers.tolist(),touch_decisions=self.trace,
             grasp_verified=self._grasp_verified.tolist(),

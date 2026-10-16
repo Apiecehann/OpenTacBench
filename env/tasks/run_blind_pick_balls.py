@@ -7,8 +7,10 @@ from isaaclab.app import AppLauncher
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--balls',type=int,choices=range(2,10),default=6)
+    parser.add_argument('--balls',type=int,choices=range(2,13),default=12)
     parser.add_argument('--target',choices=('hard','soft','textured'),default='textured')
+    from ._blind_ball_models import MATERIALS,DEFAULT_PROFILES
+    parser.add_argument('--materials',nargs='+',choices=[m.name for m in MATERIALS],default=DEFAULT_PROFILES)
     parser.add_argument('--seed',type=int,default=0)
     parser.add_argument('--video',action='store_true')
     parser.add_argument('--control',choices=('demo','idle'),default='demo')
@@ -26,6 +28,7 @@ def main():
         import torch
         from .blind_pick_balls import Task,TaskCfg
         task=Task(TaskCfg(device=args.device,ball_count=args.balls,target_class=args.target,
+            material_profiles=tuple(args.materials),
             seed=args.seed,record_video=args.video,image_shape=(args.image_width*3//4,args.image_width)))
         args.output.mkdir(parents=True,exist_ok=True)
         if args.video:
@@ -50,7 +53,9 @@ def main():
                     panel[top:top+336,16:464]=rgb
                     cv2.putText(panel,'GelSight Mini - '+name,(16,i*360+17),
                         cv2.FONT_HERSHEY_SIMPLEX,.46,(240,244,248),1,cv2.LINE_AA)
-                writer.append_data(np.concatenate([scene,panel],axis=1))
+                frame=np.concatenate([scene,panel],axis=1)
+                writer.append_data(frame)
+                if frames==0: imageio.imwrite(args.output/'scene.png',frame)
             frames+=1
             if len(task.trace)>reported_probes:
                 print('BLIND_BALLS_PROBE '+json.dumps(task.trace[-1]),flush=True)

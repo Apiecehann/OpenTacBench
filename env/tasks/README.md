@@ -343,18 +343,22 @@ described above, with a Franka Panda and two GelSight Mini pads.
 
 ```bash
 bash scripts/run_blind_pick_balls.sh --headless --video
-# Reference six-ball demonstration with faster rendering:
+# Twelve balls with faster rendering:
 bash scripts/run_blind_pick_balls.sh --headless --rendering_mode performance --image-width 320 --video
-# Increase clutter to nine balls:
-bash scripts/run_blind_pick_balls.sh --headless --video --balls 9
-# Two balls, another target category and another random layout:
-bash scripts/run_blind_pick_balls.sh --headless --video --balls 2 --target soft --seed 3
+# Nine balls, retrieve a soft ball:
+bash scripts/run_blind_pick_balls.sh --headless --video --balls 9 --target soft
+# Ten balls, retrieve a hard ball, with only two material profiles:
+bash scripts/run_blind_pick_balls.sh --headless --video --balls 10 --target hard --materials polished_polymer rubber
 ```
 
-The default scene contains six balls, two per category, using all six profiles.
-`--balls 2` through `--balls 9` select the count, with balanced categories and
-randomized, non-overlapping positions. The catalogue
-has six synthetic material profiles:
+The default scene contains twelve balls, four per category, using three profiles:
+polished polymer, rubber and raised dots. Each sphere has a 30 mm base radius
+(previously 24 mm); dots extend up to another 2.5 mm. The box footprint is
+36 × 44 cm (previously 40 × 50 cm), with the original 19 cm rim height.
+`--balls 2` through `--balls 12` select the count; 9–12 are useful cluttered
+settings. Jittered, randomly assigned cells keep the larger balls separated.
+`--materials` selects a subset of the following synthetic profiles, while
+balancing their categories:
 
 | Category | Profiles | Physical difference |
 | --- | --- | --- |
@@ -365,6 +369,14 @@ has six synthetic material profiles:
 Every ball is a volumetric FEM mesh, including its raised surface. The seed
 selects profiles when the task is created; resets randomize continuous,
 non-overlapping positions inside the box.
+`--target hard`, `--target soft` or `--target textured` chooses which category
+counts as success. At least one selected material must belong to that category.
+Python callers can use `TaskCfg(target_class='soft', ball_count=9)` or change
+the goal on reset with `task.reset(options={'target_class': 'hard'})`, provided
+that category exists in the already-created scene. Any ball of that category
+can satisfy the task; it must still be lifted clear of the rim and released
+fully inside the bowl. A wrong category fails the episode.
+
 The target category is public. The policy observation contains 25 robot/TCP
 state values, the three-way target category and `tactile/left/rgb` and
 `tactile/right/rgb`. No scene camera, object pose, material label or seed is
@@ -372,8 +384,9 @@ returned to the policy. The observer camera is used only for video.
 
 Both standalone tasks and the other benchmark tasks import their background
 and table defaults from `envs/_scene.py`: `assets/scene/base5.exr`,
-`plate01.usda` and its original `texture01` material. The piano table is scaled
-to support its wider keyboard and arm. Sparse checkouts must include these
+`plate01.usda` and its original `texture01` material. The ball-task table is
+scaled by 1.35 in both horizontal axes, including its collision geometry.
+The piano table is scaled to support its wider keyboard and arm. Sparse checkouts must include these
 scene assets and `gridroom_curved.usd` before launch.
 
 The action is `(tcp_x_m, tcp_y_m, tcp_z_m, jaw_position_m)`. The scripted
@@ -403,22 +416,58 @@ settings do not change the sensor model or optical calibration.
 The scripted expert uses internal contact forces and physical contact
 relief for search/probing; those measurements are not returned in observations.
 The wrapper also exposes Isaac's bundled Torch libraries for the IK solver.
+Search uses a narrower jaw opening before centering: the fully open Mini
+gripper can straddle a 6 cm ball without touching it.
+The expert counts contact gradients only on the original Mini sensing-face
+vertices with loads directed into the backing. In clutter, a neighboring ball
+can push the back or edge of a pad; those contacts do not establish a grasp.
+Squeeze probes regulate their requested load while settling, rather than
+freezing the first threshold-crossing jaw position as a soft ball relaxes.
 
-Outputs are `data/blind_pick_balls/video.mp4` and `result.json`. The video has
+The shared UIPC renderer converts world-space FEM vertices to the mesh's
+current local frame before writing Fabric points. This prevents the arm's
+transform from being applied twice, which made gel surfaces appear as small
+floating dark pieces in older recordings. A native pose-change check compared
+both rendered gel surfaces with their physical vertices (maximum error below
+0.1 micrometres) and reproduced the floating piece by restoring the old
+coordinate write. Robot, sensor mounting and optical calibration are retained.
+
+Outputs are `data/blind_pick_balls/video.mp4`, `scene.png` and `result.json`. The video has
 the observer scene and complete left/right tactile RGB images, with titles
 outside the images. Ground-truth labels and positions in `result.json` are
 private diagnostics for validating episodes, separate from observations.
 `--control idle --idle-frames 120` checks the no-action counterfactual.
 
-The default six-ball, seed-0 textured-target demonstration passed in the
+The current twelve-ball, seed-0 demonstration with `--target soft` passed
+at 320 × 240 in the headless performance profile: 4936 physics steps,
+2468 frames and 41.13 simulated seconds. It identified a rubber ball with
+0.418 mm/N squeeze compliance and 12.4 micrometres of fine surface relief,
+held about 3 N on each sensing face, verified the lift and released the ball
+7.3 mm from the bowl centre. The other eleven balls remained in the box.
+The recording, scene preview and diagnostics are in
+`data/blind_pick_balls/twelve_balls_demo`. This recording uses the corrected
+gel rendering described above.
+A native nine-ball idle check switched among all three target categories,
+validated their public goal vectors and instructions, and scored zero for
+each. It also checked the unchanged 19 cm rim and the scaled table geometry.
+The 51 focused CPU checks include layout clearance, material selection,
+wrong-category rejection, full-ball placement, sensing-face contact filtering,
+drive deadband/relaxation and shared UIPC reset/render regressions. These
+checks do not establish retrieval success for every layout and target.
+
+The earlier six-ball, seed-0 textured-target demonstration (24 mm ball radius,
+six profiles and the larger box) passed in the
 headless performance profile at 320 × 240: blind search, tactile classification,
 verified lift and released placement completed in 64.45 simulated seconds
 (3867 frames). The raised-rib ball settled 0.41 mm from the bowl centre, and
 the other five balls remained in the box. Its recording and diagnostics are
 in `data/blind_pick_balls/six_balls_demo`. A six-ball idle run also preserved
 the original 640 × 480 observation contract and scored zero. Layout sampling
-tests cover counts 2–9; these demonstrations do not establish retrieval
+tests now cover counts 2–12, all target categories and material selection;
+these demonstrations do not establish retrieval
 success across every count, layout and material profile.
+The historical six-ball clip predates the shared gel-render transform fix;
+use the current twelve-ball recording to review the sensor mounting.
 
 The earlier three-ball, seed-0 textured-target demo completed the blind search,
 verified lift and released placement in 45.47 simulated seconds (2728 video

@@ -10,6 +10,11 @@ FLOOR_Z=.016
 RIM_Z=.19
 BOWL_CENTER=np.array([.49,-.34])
 BOWL_RADIUS=.075
+BALL_RADIUS=.030
+BOX_CENTER=np.array([.51,0.])
+BOX_SIZE=np.array([.36,.44])
+WALL_THICKNESS=.012
+DEFAULT_PROFILES=('polished_polymer','rubber','raised_dots')
 
 
 @dataclass(frozen=True)
@@ -19,7 +24,7 @@ class BallMaterial:
     youngs_modulus: float
     texture: str
     color: tuple
-    radius: float=.024
+    radius: float=BALL_RADIUS
     density: float=700.
 
 
@@ -86,44 +91,39 @@ def ball_mesh(material,subdivisions=3):
     return np.ascontiguousarray(points),tets
 
 
-def sample_scene(rng,count=6,target='textured'):
-    if count not in range(2,10) or target not in CLASSES:
-        raise ValueError('Use 2 to 9 balls and a known target class')
-    others=[name for name in CLASSES if name!=target]
-    kinds=([target,*list(rng.choice(others,count-1,replace=False))] if count<=3
-        else list(CLASSES)*(count//3)+list(rng.choice(CLASSES,count%3,replace=False)))
+def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
+    if count not in range(2,13) or target not in CLASSES:
+        raise ValueError('Use 2 to 12 balls and a known target class')
+    catalogue={m.name:m for m in MATERIALS}
+    if not profiles or len(set(profiles))!=len(profiles) or any(p not in catalogue for p in profiles):
+        raise ValueError('Select distinct known material profiles')
+    selected=[catalogue[p] for p in profiles]
+    available=[k for k in CLASSES if any(m.kind==k for m in selected)]
+    if target not in available: raise ValueError('Target class must be included in the selected materials')
+    others=[name for name in available if name!=target]
+    kinds=([target,*list(rng.choice(others,count-1,replace=False))] if count<len(available)
+        else available*(count//len(available))+list(rng.choice(available,count%len(available),replace=False)))
     rng.shuffle(kinds)
-    pools={kind:list(rng.permutation([i for i,m in enumerate(MATERIALS) if m.kind==kind])) for kind in CLASSES} if count>3 else None
     materials=[]
+    pools={}
     for kind in kinds:
-        if pools is None:
-            index=int(rng.choice([i for i,m in enumerate(MATERIALS) if m.kind==kind]))
-        else:
-            if not pools[kind]: pools[kind]=list(rng.permutation([i for i,m in enumerate(MATERIALS) if m.kind==kind]))
-            index=int(pools[kind].pop())
-        materials.append(MATERIALS[index])
-    # Restart a crowded packing rather than accepting overlapping balls.
-    for _ in range(32):
-        centers=[]
-        for material in materials:
-            for _ in range(1000):
-                xy=rng.uniform([.445,-.12],[.575,.12]) if count<=3 else rng.uniform([.43,-.16],[.625,.16])
-                if all(np.linalg.norm(xy-p[:2])>.078 for p in centers):
-                    centers.append(np.r_[xy,FLOOR_Z+material.radius+.004])
-                    break
-            else:
-                break
-        if len(centers)==count: return materials,np.asarray(centers)
-    raise RuntimeError('Could not sample separated balls')
+        if not pools.get(kind): pools[kind]=list(rng.permutation([i for i,m in enumerate(selected) if m.kind==kind]))
+        materials.append(selected[int(pools[kind].pop())])
+    # Randomized cells guarantee clearance even with twelve larger FEM balls.
+    # The controller only knows the box bounds; it does not receive these cells.
+    cells=np.array([(x,y) for x in (.422,.51,.598) for y in (-.132,-.044,.044,.132)])
+    xy=cells[rng.permutation(len(cells))[:count]]+rng.uniform(-.004,.004,(count,2))
+    centers=np.c_[xy,[FLOOR_Z+m.radius+.004 for m in materials]]
+    return materials,centers
 
 
-def scan_points(count=6):
+def scan_points(count=12):
     """Known-workspace raster; never receives a ball pose or material label."""
     rows=[]
-    for i,y in enumerate(np.arange(-.08,.081,.04) if count<=3 else np.arange(-.12,.121,.04)):
-        xs=np.arange(.405,.616 if count<=3 else .656,.005)
+    for i,y in enumerate(np.arange(-.132,.133,.033)):
+        xs=np.arange(.400,.626,.005)
         if i%2: xs=xs[::-1]
-        rows.extend(np.array([x,y,FLOOR_Z+.025]) for x in xs)
+        rows.extend(np.array([x,y,FLOOR_Z+BALL_RADIUS]) for x in xs)
     return rows
 
 
@@ -147,13 +147,19 @@ def classify_touch(compliance_m_per_N,roughness_m):
     return 'soft' if compliance_m_per_N>3.5e-4 else 'hard'
 
 
-def sphere_center_xy(contact_point,force,radius=.024):
+def sphere_center_xy(contact_point,force,radius=BALL_RADIUS):
     """Normalize the full outward force before projecting sphere geometry to XY."""
     point,force=np.asarray(contact_point,dtype=float),np.asarray(force,dtype=float)
     magnitude=np.linalg.norm(force)
     if point.shape!=(3,) or force.shape!=(3,) or not np.isfinite([*point,*force,radius]).all() or magnitude<1e-8 or radius<=0:
         raise ValueError('Expected a finite contact point, nonzero force and positive radius')
     return (point-radius*force/magnitude)[:2]
+
+
+def pad_front_contacts(indices,forces,vertex_offset,surface_vertices,backing_axis):
+    """Select loads on the original sensing face, directed into its backing."""
+    return (np.isin(np.asarray(indices)-vertex_offset,surface_vertices)
+        & (np.asarray(forces)@np.asarray(backing_axis)>0.))
 
 
 @dataclass
@@ -164,8 +170,8 @@ class PickScore:
 
     def advance(self,points,opening,target_kind,actual_kind,grasp_verified,dt):
         points=np.asarray(points)
-        center=points.mean(axis=0)
-        in_bowl=(np.linalg.norm(center[:2]-BOWL_CENTER)<BOWL_RADIUS-.028
+        extent=np.linalg.norm(points[:,:2]-BOWL_CENTER,axis=1).max()
+        in_bowl=(extent<BOWL_RADIUS
             and points[:,2].min()>=FLOOR_Z-.003 and points[:,2].max()<.10)
         released=opening>.036
         if in_bowl and released:
