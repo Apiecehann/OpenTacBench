@@ -111,8 +111,8 @@ def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
         materials.append(selected[int(pools[kind].pop())])
     # Randomized cells guarantee clearance even with twelve larger FEM balls.
     # The controller only knows the box bounds; it does not receive these cells.
-    cells=np.array([(x,y) for x in (.422,.51,.598) for y in (-.132,-.044,.044,.132)])
-    xy=cells[rng.permutation(len(cells))[:count]]+rng.uniform(-.004,.004,(count,2))
+    cells=np.array([(.396+.069*j+(i%2)*.0345,-.06+.06*i) for i in range(3) for j in range(4)])
+    xy=cells[rng.permutation(len(cells))[:count]]+rng.uniform(-.001,.001,(count,2))
     centers=np.c_[xy,[FLOOR_Z+m.radius+.004 for m in materials]]
     return materials,centers
 
@@ -120,8 +120,8 @@ def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
 def scan_points(count=12):
     """Known-workspace raster; never receives a ball pose or material label."""
     rows=[]
-    for i,y in enumerate(np.arange(-.132,.133,.033)):
-        xs=np.arange(.400,.626,.005)
+    for i,y in enumerate(np.arange(-.06,.061,.03)):
+        xs=np.arange(.390,.641,.005)
         if i%2: xs=xs[::-1]
         rows.extend(np.array([x,y,FLOOR_Z+BALL_RADIUS]) for x in xs)
     return rows
@@ -160,6 +160,38 @@ def pad_front_contacts(indices,forces,vertex_offset,surface_vertices,backing_axi
     """Select loads on the original sensing face, directed into its backing."""
     return (np.isin(np.asarray(indices)-vertex_offset,surface_vertices)
         & (np.asarray(forces)@np.asarray(backing_axis)>0.))
+
+
+def convex_collision_mesh(points):
+    """Match an asset's authored convexHull collider with a positive-volume mesh."""
+    points=np.unique(np.round(np.asarray(points,dtype=float),9),axis=0)
+    hull=ConvexHull(points)
+    vertices=points[hull.vertices]
+    remap=np.full(len(points),-1,dtype=int)
+    remap[hull.vertices]=np.arange(len(vertices))
+    faces=remap[hull.simplices]
+    mesh=np.vstack([vertices.mean(0),vertices])
+    tets=np.c_[np.zeros(len(faces),dtype=np.int32),faces+1]
+    volume=np.linalg.det(np.stack([mesh[tets[:,i]]-mesh[tets[:,0]] for i in (1,2,3)],axis=-1))
+    negative=volume<0
+    tets[negative,1],tets[negative,2]=tets[negative,2].copy(),tets[negative,1].copy()
+    edges=np.unique(np.sort(np.concatenate([faces[:,[0,1]],faces[:,[1,2]],faces[:,[2,0]]]),axis=1),axis=0)
+    return mesh,np.ascontiguousarray(tets,dtype=np.int32),hull.equations,vertices[edges[:,1]]-vertices[edges[:,0]]
+
+
+def convex_box_penetration(vertices,normals,edges,center,half_size,rotation=None):
+    """Separating-axis penetration in metres; zero for disjoint convex solids."""
+    rotation=np.eye(3) if rotation is None else np.asarray(rotation)
+    vertices=(np.asarray(vertices)-center)@rotation
+    normals=np.asarray(normals)@rotation
+    edges=np.asarray(edges)@rotation
+    axes=np.vstack([np.eye(3),normals,np.cross(edges[:,None,:],np.eye(3)[None,:,:]).reshape(-1,3)])
+    lengths=np.linalg.norm(axes,axis=1)
+    axes=axes[lengths>1.e-10]/lengths[lengths>1.e-10,None]
+    projection=vertices@axes.T
+    radius=np.abs(axes)@half_size
+    overlap=np.minimum(projection.max(0)+radius,radius-projection.min(0))
+    return float(max(0.,overlap.min()))
 
 
 @dataclass

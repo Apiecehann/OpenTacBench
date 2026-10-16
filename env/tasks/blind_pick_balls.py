@@ -28,6 +28,7 @@ from ._blind_ball_models import (
     BOX_CENTER,BOX_SIZE,WALL_THICKNESS,DEFAULT_PROFILES,PickScore,
     ball_mesh,sample_scene,scan_points,surface_roughness,classify_touch,sphere_center_xy,pad_front_contacts,
 )
+from ._blind_ball_collision import RobotBallCollisions,enable_fixture_collision
 
 
 TASK_INSTRUCTION='Find the {target} ball using touch alone, then lift it clear of the box and release it into the bowl.'
@@ -59,6 +60,7 @@ class _BallWorld:
         self.force=np.zeros((2,3))
         self.patches=[None,None]
         self.depths=[None,None]
+        self.fixture_shapes=[]
         self.surface_vertices=np.unique(SURFACE_FACES['gsmini'])
         self.initial_centers=np.array(centers,copy=True)
         self._cache=None
@@ -92,6 +94,8 @@ class _BallWorld:
                     youngs_modulus=material.youngs_modulus/1.e6,poisson_rate=.40),
                 material.density,material.color)
             self.balls.append(ball)
+        self.collisions=RobotBallCollisions(task,self.uipc,self.gel_contact,self.fixture_contact)
+        self.collisions.fixtures=self.fixture_shapes
 
     def _object(self,name,points,tets,position,constitution,density,color):
         # Author scene geometry in world coordinates, as UIPC's renderer expects.
@@ -108,6 +112,7 @@ class _BallWorld:
     def _create_fixture(self):
         contacts=self.uipc.scene.contact_tabular()
         fixture_contact=contacts.create('container')
+        self.fixture_contact=fixture_contact
         contacts.insert(fixture_contact,fixture_contact,.45,1.e9,enable=False)
         resistance=self.uipc.cfg.contact.default_contact_resistance*1.e9
         contacts.insert(fixture_contact,contacts.default_element(),.45,resistance)
@@ -124,6 +129,7 @@ class _BallWorld:
             parts.append(('bowl_rim_'+str(i),(.012,.030,.035),(*center,FLOOR_Z)))
         for name,size,bottom in parts:
             points,tets=box_mesh(size,(1,1,1))
+            rotation=np.eye(3)
             if name.startswith('bowl_rim'):
                 angle=int(name.rsplit('_',1)[1])*2*np.pi/20
                 rotation=np.array([[np.cos(angle),-np.sin(angle),0],
@@ -133,10 +139,22 @@ class _BallWorld:
                 UipcObjectCfg.AffineBodyConstitutionCfg(kinematic=True),1.e6,
                 (.66,.43,.12) if name.startswith('bowl') else (.12,.19,.23))
             fixture_contact.apply_to(fixture.uipc_meshes[0])
+            enable_fixture_collision(self.task.stage.GetPrimAtPath(fixture.cfg.prim_path))
+            self.fixture_shapes.append((name,np.asarray(bottom)+np.array([0.,0.,size[2]/2]),np.asarray(size)/2,rotation))
 
     def setup(self):
+        self.collisions.initialize()
         self.uipc.setup_sim()
-        for sensor in self.sensors: sensor.setup()
+        for sensor in self.sensors:
+            sensor.setup()
+            # Use the existing attachment reset to place every gel vertex at
+            # the starting hand pose. Sweeping from the straight USD pose can
+            # make the two thin pads cross during the first Newton solve.
+            points=sensor._get_gelpad_points_for_current_attachment()
+            sensor._write_gelpad_vertices(points)
+        self.uipc.world.retrieve()
+        self.uipc.update_render_meshes()
+        for sensor in self.sensors: sensor.reset_reference()
         self.uipc.save_frame()
 
     def reset(self,centers):
@@ -149,6 +167,7 @@ class _BallWorld:
             ball.write_vertex_positions_to_sim(ball.init_vertex_pos+displacement)
         self.force.fill(0.)
         self._cache=None
+        self.collisions.reset()
 
     def opening_axis(self,i):
         # Finger-joint translation, independent of the camera's installation angle.
@@ -164,6 +183,7 @@ class _BallWorld:
         # UipcSim.step and UipcIsaacAttachments already ran via sim.step().
         indices,gradient=self.uipc.get_contact_gradient()
         forces=-gradient/self.dt**2
+        self.collisions.update(indices,forces,self.sensors,self.balls)
         self.force.fill(0.)
         self.patches=[None,None]
         for i,sensor in enumerate(self.sensors):
@@ -212,7 +232,8 @@ class Task(gym.Env):
         self.failure=''
         self._done=False
         self.sim=sim_utils.SimulationContext(sim_utils.SimulationCfg(
-            dt=self.cfg.physics_dt,device=self.cfg.device,render_interval=self.cfg.action_repeat))
+            dt=self.cfg.physics_dt,device=self.cfg.device,render_interval=self.cfg.action_repeat,
+            physx=sim_utils.PhysxCfg(enable_external_forces_every_iteration=True)))
         self.stage=omni.usd.get_context().get_stage()
         from envs._scene import scene_light_cfg,scene_plate_cfg,resolve_scene_background_texture
         plate,light=scene_plate_cfg('/World/Table'),scene_light_cfg('/World/Light')
@@ -224,10 +245,17 @@ class Task(gym.Env):
         if self.cfg.robot_usd: cfg.spawn.usd_path=self.cfg.robot_usd
         cfg.spawn.articulation_props.enabled_self_collisions=False
         cfg.spawn.articulation_props.fix_root_link=True
+        cfg.spawn.articulation_props.solver_position_iteration_count=64
+        cfg.spawn.articulation_props.solver_velocity_iteration_count=8
         cfg.init_state.joint_pos={'panda_joint1':0.,'panda_joint2':-.569,'panda_joint3':0.,
             'panda_joint4':-2.810,'panda_joint5':0.,'panda_joint6':2.241,'panda_joint7':.741,
             'panda_finger_joint.*':.04}
         self.robot=Articulation(cfg)
+        # This task exposes touch only. Remove the unused wrist RGB camera
+        # assembly rather than driving its visual housing through the box.
+        for path in ('WristCamera','panda_hand/wrist_camera'):
+            prim=self.stage.GetPrimAtPath(cfg.prim_path+'/'+path)
+            if prim:prim.SetActive(False)
         self.scene=UipcInteractiveScene(InteractiveSceneCfg(num_envs=1,env_spacing=1.5))
         self.scene.articulations['robot']=self.robot
         self.physics=_BallWorld(self,self.materials,self._initial_centers)
@@ -239,6 +267,14 @@ class Task(gym.Env):
             self.scene.sensors['observer']=self.camera
         self.scene.clone_environments(copy_from_source=False)
         self.sim.reset()
+        # Initialize PhysX joint poses before creating the native rigid
+        # colliders. Otherwise the first reset asks CCD to sweep the entire
+        # arm from the USD's straight pose to its bent starting pose at once.
+        rest=self.robot.data.default_joint_pos
+        self.robot.write_joint_state_to_sim(rest,torch.zeros_like(rest))
+        self.robot.set_joint_position_target(rest)
+        self.robot.write_data_to_sim()
+        self.sim.step(render=False)
         self.scene.update(self.cfg.physics_dt)
         self.physics.setup()
         self.arm_ids=self.robot.find_joints('panda_joint[1-7]')[0]
@@ -325,6 +361,9 @@ class Task(gym.Env):
         self._score()
 
     def _score(self):
+        collision=self.physics.collisions
+        if max(collision.max_ball_penetration,collision.max_fixture_penetration)>.001:
+            self.failure='rigid_interpenetration'
         center=self._tcp()[0][0].cpu().numpy()
         loaded=np.linalg.norm(self.physics.force,axis=1)>.12
         opening=float(self.robot.data.joint_pos[0,self.finger_ids].mean())
@@ -350,7 +389,8 @@ class Task(gym.Env):
         if action.shape!=(4,) or not np.isfinite(action).all(): raise ValueError('Expected finite TCP xyz and per-jaw opening')
         action=np.clip(action,self.action_space.low,self.action_space.high)
         delta=action[:3]-self._goal
-        self._goal+=delta*min(1.,.002/max(np.linalg.norm(delta),1e-12))
+        speed=.0007 if min(self._goal[2],action[2])<RIM_Z+.06 else .002
+        self._goal+=delta*min(1.,speed/max(np.linalg.norm(delta),1e-12))
         self._opening+=float(np.clip(action[3]-self._opening,-.0005,.0005))
         for _ in range(self.cfg.action_repeat):
             self._physics_step()
@@ -377,7 +417,7 @@ class Task(gym.Env):
 
     def _loads(self): return np.linalg.norm(self.physics.force,axis=1)
 
-    def _go(self,position,opening=None,hold=False,limit=1200,sense=False):
+    def _go(self,position,opening=None,hold=False,limit=1200,sense=False,contact_tolerance=None):
         position=np.asarray(position,dtype=float)
         stable=0
         unloaded=0
@@ -401,6 +441,12 @@ class Task(gym.Env):
                 self._goal=self._tcp()[0][0].cpu().numpy().copy()
                 return True
             error=np.linalg.norm(self._tcp()[0][0].cpu().numpy()-position)
+            # A loaded physical gripper can settle a few millimetres from
+            # its pose target. Only the final grasp approach may transition
+            # on bilateral sensing-face contact; walls/case loads do not count.
+            if contact_tolerance is not None and error<contact_tolerance and self._loads().min()>.12:
+                self._goal=self._tcp()[0][0].cpu().numpy().copy()
+                return True
             if sense and error<.004:
                 return True
             stable=stable+1 if error<.002 else 0
@@ -480,7 +526,7 @@ class Task(gym.Env):
             # pad contact. Search with a narrower gap, then reopen to center.
             if not self._go(point,opening=.024,sense=True): break
             xy=self._locate()
-            invalid=(xy is None or not (.395<xy[0]<.63 and abs(xy[1])<.175)
+            invalid=(xy is None or not (.385<xy[0]<.645 and abs(xy[1])<.09)
                 or any(np.linalg.norm(xy-old)<.04 for old in rejected))
             if invalid:
                 if self._loads().max()>.07:
@@ -490,7 +536,7 @@ class Task(gym.Env):
             touch_goal=self._goal.copy()
             if not self._go(np.r_[touch_goal[:2],RIM_Z+.10],opening=.04): break
             if not self._go(np.r_[xy,RIM_Z+.10],opening=.04): break
-            if not self._go(np.r_[xy,FLOOR_Z+BALL_RADIUS],opening=.04): break
+            if not self._go(np.r_[xy,FLOOR_Z+BALL_RADIUS],opening=.026,contact_tolerance=.006): break
             kind=self._probe()
             if kind==self.cfg.target_class:
                 if not self._go(np.r_[self._goal[:2],RIM_Z+.10],hold=True): break
@@ -532,7 +578,8 @@ class Task(gym.Env):
                 image_shape=list(self.cfg.image_shape),
                 reference_surface_depth_m=float(s.sensor.marker_motion_simulator.marker_motion_sim.reference_surface_vertices_camera[:,2].median()))
                 for s in self.physics.sensors],
-            coupling='prescribed gel backing; no gel-force feedback to robot drives',
+            collision=self.physics.collisions.diagnostics(),
+            coupling='original convex robot colliders in UIPC; contact wrenches returned to PhysX; fixtures collide in both solvers',
             sensor_api='envs.sensors.tactile.VisualTactileSensor; original configuration and calibration')
 
     def close(self):

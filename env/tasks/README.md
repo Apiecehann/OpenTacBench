@@ -357,6 +357,9 @@ polished polymer, rubber and raised dots. Each sphere has a 30 mm base radius
 36 × 44 cm (previously 40 × 50 cm), with the original 19 cm rim height.
 `--balls 2` through `--balls 12` select the count; 9–12 are useful cluttered
 settings. Jittered, randomly assigned cells keep the larger balls separated.
+The initial cluster stays inside the aperture needed by the wide Panda palm;
+the 19 cm walls are retained. The unused wrist RGB camera housing is disabled
+in this isolated task; both original GelSight Mini assemblies are retained.
 `--materials` selects a subset of the following synthetic profiles, while
 balancing their categories:
 
@@ -399,8 +402,23 @@ independently checks the actual ball's category, a sustained
 bilateral lift and a released ball inside the bowl; a wrong material fails.
 
 PhysX drives the arm; UIPC solves the pads, balls and container together.
-Gel backing poses follow the fingers, with no gel-force feedback to robot
-drives. The task reuses `create_gelsight_mini_cfg` and `VisualTactileSensor`
+The container meshes also have static PhysX collision shapes, so the arm,
+fingers and sensor cases are blocked by the walls. The static PhysX shapes
+use a 1 mm rest separation and 2 mm contact margin to accommodate convex
+cooking and contact tolerances under sustained controller pressure.
+The robot asset's original
+convex-hull collision meshes are mirrored as native UIPC affine bodies;
+pad and rigid-shell contact forces and torques are returned to PhysX through
+its original wrench composer. The mirrors are initialized after the robot
+reaches its starting joint pose and follow the original attachment callback
+order. The existing sensor attachment reset places both gels at that pose
+before saving frame zero, avoiding a large initial sweep of the thin pads.
+No tactile optical or calibration parameters are changed.
+`result.json/collision` reports mirror error, reaction force and maximum
+measured penetration of ball vertices into rigid hulls and of robot hulls
+into container fixtures. Penetration above 1 mm invalidates the episode,
+including an otherwise successful release. These checks supplement the
+physical collision solvers. The task reuses `create_gelsight_mini_cfg` and `VisualTactileSensor`
 from `envs/sensors/tactile.py`, the original Franka GelSight Mini camera optics,
 gel tetrahedra and attachments, bundled Taxim calibration and FEM marker motion.
 The calibrated pixel scale is unchanged; the RGB image includes its moving
@@ -423,6 +441,11 @@ vertices with loads directed into the backing. In clutter, a neighboring ball
 can push the back or edge of a pad; those contacts do not establish a grasp.
 Squeeze probes regulate their requested load while settling, rather than
 freezing the first threshold-crossing jaw position as a soft ball relaxes.
+The final grasp approach transitions to force probing when both sensing
+faces are loaded and the TCP is within 6 mm of its target. Other moves keep
+the usual position tolerance. This accommodates contact deflection from
+the physical reaction wrenches without accepting wall or back-shell loads
+as a grasp; the independent lift, release and penetration checks still apply.
 
 The shared UIPC renderer converts world-space FEM vertices to the mesh's
 current local frame before writing Fabric points. This prevents the arm's
@@ -438,21 +461,44 @@ outside the images. Ground-truth labels and positions in `result.json` are
 private diagnostics for validating episodes, separate from observations.
 `--control idle --idle-frames 120` checks the no-action counterfactual.
 
-The current twelve-ball, seed-0 demonstration with `--target soft` passed
-at 320 × 240 in the headless performance profile: 4936 physics steps,
-2468 frames and 41.13 simulated seconds. It identified a rubber ball with
-0.418 mm/N squeeze compliance and 12.4 micrometres of fine surface relief,
-held about 3 N on each sensing face, verified the lift and released the ball
-7.3 mm from the bowl centre. The other eleven balls remained in the box.
+Native collision regressions are available separately from the blind policy:
+
+```bash
+# With the standalone tactile Python environment, from the repository root:
+python scripts/check_blind_ball_collisions.py --headless --check both
+python -m pytest -q tests/test_blind_ball_collision.py tests/test_blind_pick_balls.py tests/test_uipc_vertex_reset.py
+```
+
+The native checks deliberately command the gripper through a wall, which
+must block it, and push a hard ball with the sensor's back shell. They use
+known poses only for diagnostic placement and skip RGB rendering while
+checking physical collision and wrench feedback.
+
+The native wall test commanded the TCP to y = -0.28 m while below the rim;
+the palm was blocked near y = -0.104 m, with 0.0694 mm maximum measured
+robot/fixture penetration. The back-shell check pushed a hard ball 95.9 mm
+without sensing-face loads or measured ball-vertex penetration into a rigid
+hull. These are controlled regression trajectories, separate from retrieval.
+
+The collision-coupled twelve-ball, seed-0 demonstration with `--target soft`
+passed at 320 × 240 in the headless performance profile: 5689 physics steps,
+2845 frames and 47.41 simulated seconds. It identified a rubber ball with
+0.474 mm/N squeeze compliance and 17.6 micrometres of fine surface relief,
+held about 2.7 N on each sensing face, verified the lift and released the ball
+1.43 mm from the bowl centre. The other eleven balls remained in the box.
+Measured ball-vertex/rigid-hull and robot/fixture penetration stayed at zero;
+the maximum collider-following error was 0.00190 mm. The complete H.264
+recording has 2845 frames at 60 fps (47.42 s), including both tactile RGB views.
 The recording, scene preview and diagnostics are in
-`data/blind_pick_balls/twelve_balls_demo`. This recording uses the corrected
-gel rendering described above.
-A native nine-ball idle check switched among all three target categories,
+`data/blind_pick_balls/collision_demo`. The earlier
+`data/blind_pick_balls/twelve_balls_demo` recording predates rigid collision coupling.
+An earlier native nine-ball idle check switched among all three target categories,
 validated their public goal vectors and instructions, and scored zero for
 each. It also checked the unchanged 19 cm rim and the scaled table geometry.
-The 51 focused CPU checks include layout clearance, material selection,
+The 66 focused CPU checks include layout clearance, material selection,
 wrong-category rejection, full-ball placement, sensing-face contact filtering,
-drive deadband/relaxation and shared UIPC reset/render regressions. These
+drive deadband/relaxation, convex collision geometry, penetration rejection,
+bilateral contact transitions and shared UIPC reset/render regressions. These
 checks do not establish retrieval success for every layout and target.
 
 The earlier six-ball, seed-0 textured-target demonstration (24 mm ball radius,

@@ -37,12 +37,14 @@ def test_random_layout_has_target_and_clearance(count,target):
         assert {m.name for m in materials}<=set(DEFAULT_PROFILES)
         assert p.shape==(count,3)
         distances=np.linalg.norm(p[:,None,:2]-p[None,:,:2],axis=-1)+np.eye(count)
-        assert distances.min()>.078
+        assert distances.min()>.066
         # Includes the largest possible raised relief, independent of mesh sampling.
         radius=np.array([m.radius+.0025 for m in materials])
         inner=BOX_SIZE/2-WALL_THICKNESS
         assert (np.abs(p[:,:2]-BOX_CENTER)+radius[:,None]<inner).all()
-        assert ((distances-np.add.outer(radius,radius))>.01).all()
+        assert ((distances-np.add.outer(radius,radius))>.001).all()
+        # Keep every initial ball centre within the wide palm's box aperture.
+        assert (np.abs(p[:,1])<.062).all()
         samples.append(p[0,:2])
     assert len(np.unique(samples,axis=0))==30
 
@@ -163,3 +165,50 @@ def test_touch_controller_has_no_actor_state_or_camera_reads():
     for method in task.body:
         if isinstance(method,ast.FunctionDef) and method.name in controller:
             assert not {n.attr for n in ast.walk(method) if isinstance(n,ast.Attribute)}&forbidden
+
+
+@pytest.mark.parametrize('ball_depth,wall_depth,success',[(0.,0.,True),(.0011,0.,False),(0.,.0011,False)])
+def test_rigid_penetration_invalidates_an_otherwise_successful_episode(ball_depth,wall_depth,success):
+    from types import SimpleNamespace,MethodType
+    path=Path(__file__).resolve().parents[1]/'env/tasks/blind_pick_balls.py'
+    tree=ast.parse(path.read_text(encoding='utf-8'))
+    task=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='Task')
+    methods=[n for n in task.body if isinstance(n,ast.FunctionDef) and n.name in ('_score','check_success')]
+    namespace={'np':np}
+    exec(compile(ast.Module(body=methods,type_ignores=[]),str(path),'exec'),namespace)
+    class Array(np.ndarray):
+        def cpu(self): return self
+        def numpy(self): return np.asarray(self)
+    array=lambda a:np.asarray(a).view(Array)
+    env=SimpleNamespace(physics=SimpleNamespace(force=np.zeros((2,3)),collisions=SimpleNamespace(
+        max_ball_penetration=ball_depth,max_fixture_penetration=wall_depth)),failure='',materials=[],
+        _tcp=lambda:(array(np.zeros((1,3))),None,None),finger_ids=[0,1],step_count=1,
+        robot=SimpleNamespace(data=SimpleNamespace(joint_pos=array(np.zeros((1,2))))),
+        scores=[SimpleNamespace(success=True)],cfg=SimpleNamespace(physics_dt=1/120,episode_seconds=240))
+    env.check_success=MethodType(namespace['check_success'],env)
+    namespace['_score'](env)
+    assert env.check_success()==success
+    assert env.failure==('' if success else 'rigid_interpenetration')
+
+
+@pytest.mark.parametrize('distance,loads,tolerance,expected',[
+    (.004,(1.,1.),.006,True),(.008,(1.,1.),.006,False),
+    (.004,(1.,0.),.006,False),(.004,(0.,0.),.006,False),(.004,(1.,1.),None,False),
+])
+def test_loaded_approach_requires_bilateral_face_contact_near_its_target(distance,loads,tolerance,expected):
+    from types import SimpleNamespace
+    path=Path(__file__).resolve().parents[1]/'env/tasks/blind_pick_balls.py'
+    tree=ast.parse(path.read_text(encoding='utf-8'))
+    task=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='Task')
+    method=next(n for n in task.body if isinstance(n,ast.FunctionDef) and n.name=='_go')
+    namespace={'np':np}
+    exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),namespace)
+    class Array(np.ndarray):
+        def cpu(self): return self
+        def numpy(self): return np.asarray(self)
+    actual=np.array([[distance,0.,0.]]).view(Array)
+    env=SimpleNamespace(_done=False,_opening=.026,_goal=np.zeros(3),failure='',
+        _loads=lambda:np.array(loads),_tcp=lambda:(actual,None,None),step=lambda action:None)
+    assert namespace['_go'](env,np.zeros(3),opening=.026,limit=3,contact_tolerance=tolerance)==expected
+    if expected:np.testing.assert_allclose(env._goal,actual[0])
+    else:assert env.failure=='motion_timeout'
