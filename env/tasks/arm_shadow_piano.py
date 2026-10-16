@@ -96,7 +96,8 @@ class Task(ShadowTask):
         from envs._scene import scene_plate_cfg
         self.stage.RemovePrim('/World/Table')
         plate=scene_plate_cfg('/World/Table')
-        plate.spawn.func(plate.prim_path,plate.spawn,translation=(.1,0.,-.0025),scale=(1.8,1.7,1.))
+        plate.spawn.scale=(2.2,2.1,1.)
+        plate.spawn.func(plate.prim_path,plate.spawn,translation=(.1,0.,-.0025))
 
     def _configure_hand_state(self):
         # Initialize the arm before capturing hand frames and before UIPC setup.
