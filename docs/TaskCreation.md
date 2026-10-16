@@ -324,7 +324,66 @@ bash collect_data.sh play_piano play_piano 0
 
 Bulb default sampling now targets nominal 1.55--2.88 turns, leaving margin for actual seat/probe compliance; physical success requires 1.5--3 measured formal turns. Previously sampled seeds already within the new nominal range retain their geometry, including comparison seeds 0, 1 and 2. Out-of-range default samples are redrawn; explicit `nominal_turns` must be within 1.5--3. Direction and lead estimation still use tactile image responses rather than the hidden thread specification.
 
-The current hold contract is not fully parameterized: strap acceptance uses a fixed three seconds per stage and the demonstrator uses a 3.30-second estimated-force dwell. Changing YAML `hold_seconds` alone does not change either. Bulb submission requires 180 stationary physics ticks, while physical success requires at least 132 stable ticks; changing `policy_hold_steps` alone does not shorten the stationary submission gate. A shorter task variant must update controller, scorer, recording validation, and regression cases together.
+The strap accepts exactly two force/time stages through
+`task_parameters.force_time_sequence: [F1_N, T1_s, F2_N, T2_s]`, or
+`--force-sequence F1_N T1_s F2_N T2_s` on `scripts/collect_data.py`.
+The instruction interval is 0 N through `overload_N` (24 N with the current
+band configuration); durations are independently chosen
+positive seconds. For example, `--force-sequence 13 1.5 17 4` requests
+13 N for 1.5 seconds followed by 17 N for 4 seconds. Descending levels are
+also accepted. The default remains `[12, 3, 18, 3]`. Each stage requires
+continuous measured physical tension within 0.5 N of its target; an excursion
+restarts that stage's hold. Zero means near-zero tension while retaining the
+grip. The unchanged overload check additionally rejects tension above 24 N.
+For a requested 24 N, the controller aims at 23.75 N, inside the intersection
+of the original tolerance and overload limit; the physical target remains 24 N.
+Both requested targets and controller references are recorded separately.
+The RGB controller uses the corresponding minimum hold duration plus 0.30
+seconds of settling margin. The original sensor, mesh, optical calibration
+and feature/prediction interfaces are retained. The old 12/18 N force
+regressor underestimates unloading tension over the expanded range. The
+new frozen `tension_strap_full_range.json` extends its force coefficients
+using separate native RGB/physical-force probes; the original regressor
+remains available. Regression inputs contain image-derived features only.
+Native image-feedback trials passed `[0, .75, 24, 1.25]`,
+`[24, 1, 0, .75]` and `[4, 1.25, 20, .75]`, with the original force,
+grip, strain, travel and rupture checks enabled.
+
+The policy timeout is at least the sum of both requested holds plus 30 seconds
+(60 seconds by default); the frame/action and worker wall-time budgets grow with it. Metadata,
+instructions, per-step physical diagnostics and HDF5 validation use the same
+declared sequence. The previous `target_sequence_N` plus scalar/list
+`hold_seconds` configuration remains readable. Original v1 recordings retain
+their original default contract when validated.
+
+Validated strap datasets can be collected and uploaded from the repository
+root after installing `requirements-dataset.txt` in the upload environment,
+logging in with the official ModelScope Hub client and selecting an existing
+writable dataset:
+
+```bash
+python scripts/collect_tactile_memory.py --task tension_strap --count 50 --start-seed 100 --repo-id OWNER/DATASET
+```
+
+The native interpreter defaults to `.venv-tactile/bin/python`;
+`--native-python` and `--isaac-root` select other installed paths. The
+collector freezes source hashes, starts a fresh native scene per physics
+seed and counts successful, validated episodes. Prompt forces and hold
+times use a separate random stream from hidden material parameters.
+The collector uses one native process at a time and overlaps uploads with
+the next episode.
+
+Uploads contain the original HDF5, instruction/configuration, physical
+verdict, checksum manifest and issued-joint-command audit. The strap's
+`work/<seed>/trace.jsonl` includes privileged physical force diagnostics
+for auditing. The first accepted HDF5 is downloaded and hash-checked;
+each subsequent upload includes remote manifest readback. Completed
+episodes can be resumed with the same source hashes and output path;
+interrupted attempts are preserved for inspection.
+
+Bulb submission still requires 180 stationary physics ticks, while physical
+success requires at least 132 stable ticks; changing `policy_hold_steps`
+alone does not shorten the stationary submission gate.
 
 The standard `tension_strap.yml` profile selects scale 3. On paired seeds 0, 1, and 2, both scale 1 and scale 3 succeeded in all three episodes. Total physics ticks were 2833/2870/2911 before and 1458/1490/1594 after: the mean fell from 2871.3 to 1514 (47.3%). Mean policy ticks fell from 2807.3 to 1450, and saved policy frames from 1403 to 724. Total recorded frames are 711/727/779 (mean 739). Both force stages still require three seconds of sustained physical acceptance. Comparing recorded end-effector pose and jaw width after normalized path-length alignment gave maximum position differences of 0.186/0.066/0.083 mm and orientation differences of 0.100/0.038/0.021 degrees. This is a three-seed regression result, not a large-scale success-rate estimate.
 

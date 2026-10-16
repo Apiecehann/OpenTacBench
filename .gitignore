@@ -75,6 +75,9 @@ textures.zip
 /.venv-tactile
 /.cache/piano_tactile/
 /.cache/blind_pick_balls/
+/.cache/aloha_menagerie/
+/.cache/aloha_gsmini/
+/.venv-hub/
 /.codex_*/
 /_diagnostics/
 /data_*/

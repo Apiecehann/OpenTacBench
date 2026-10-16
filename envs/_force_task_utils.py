@@ -1004,6 +1004,8 @@ def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
         files = [repo / "envs" / (name + ".py"), Path(__file__).resolve(),
                  repo / "envs/_base_task.py", repo / "envs/robot/robot.py",
                  repo / "envs/utils/data.py", repo / "scripts" / ("collect_data.py" if mode == "collect" else "eval_policy.py")]
+        if name == 'tension_strap':
+            files += [repo / 'envs/_strap_sequence.py', repo / 'scripts/validate_final_task_episode.py']
         if deploy.get("policy_name") == "openpi":
             files += list((repo / "policy/openpi").glob("*.py"))
         calibration = config.get("task_parameters", {}).get("calibration")
@@ -1046,6 +1048,12 @@ def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
                        *sys.argv[1:], "--start_seed", str(seed), "--max_seed", str(seed),
                        "--episode_num" if mode == "collect" else "--total_num", "1"]
             timeout = float(config.get("max_episode_seconds", 2200)) + 900
+            if name=='tension_strap':
+                from envs._strap_sequence import StrapAcceptanceLimits
+                declared=StrapAcceptanceLimits.from_parameters(config.get('task_parameters',{}))
+                # Long requested holds need wall time as well as physics/frame
+                # budgets; this solver commonly runs slower than real time.
+                timeout=max(timeout,60*declared.timeout_seconds+900)
             if not math.isfinite(timeout) or timeout <= 0:
                 raise ValueError("Invalid worker wall-time limit")
             print(f"{name}: {mode} seed {seed}, log {attempt / 'launch.log'}", flush=True)

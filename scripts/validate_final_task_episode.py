@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import h5py
 import numpy as np
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from envs._strap_sequence import StrapAcceptanceLimits
 try:
     from .validate_insert_usb_schema import validate, validate_phase_contract
 except ImportError:  # Direct script invocation.
@@ -22,6 +25,12 @@ def validate_final(episode,reference=None,expect=None):
         task=context["task"];timing=context.get("timing_contract",{})
         metadata_path=episode.parent.parent/"metadata.json"
         meta=json.loads(metadata_path.read_text())[str(context["seed"])]
+        strap_limits=None
+        if task=='tension_strap':
+            try:
+                strap_limits=StrapAcceptanceLimits.from_parameters(meta.get('strap_parameters',{}))
+            except (ValueError, TypeError) as error:
+                errors.append('invalid recorded strap instruction: '+str(error))
         if task not in TASK_SECONDS:errors.append("not one of the four final tasks")
         errors.extend(validate_phase_contract(data))
         for key,wanted in {"physics_dt_s":1/120,"decimation":1,"save_frequency":2,
@@ -48,7 +57,8 @@ def validate_final(episode,reference=None,expect=None):
         # legacy counter as physical ticks for the three BaseTask exporters.
         if task=="grasp_fragile_chip" and not np.array_equal(policy_counter,steps[phases!=0]-start):
             errors.append("chip elapsed-physics policy counter is inconsistent")
-        if len(terminal) and (int(steps[terminal[0]])-start)/120>TASK_SECONDS.get(task,0)+2/120:
+        policy_timeout=strap_limits.timeout_seconds if strap_limits else TASK_SECONDS.get(task,0)
+        if len(terminal) and (int(steps[terminal[0]])-start)/120>policy_timeout+2/120:
             errors.append("physical verdict exceeds the declared policy timeout")
         accepted=reason=="success"
         if meta.get("result") not in ("success","fail"):
@@ -76,9 +86,18 @@ def validate_final(episode,reference=None,expect=None):
             physical=meta.get("strap_acceptance",{})
             if bool(meta.get("strap_accepted"))!=accepted or bool(physical.get("success"))!=accepted:
                 errors.append("strap verdict differs from independent two-stage scorer")
-            for key,value in {"target_sequence_N":[12.,18.],"tolerance_N":.5,
-                    "hold_seconds_per_stage":3.,"timeout_seconds":60.}.items():
-                if physical.get(key)!=value:errors.append("strap acceptance mismatch: "+key)
+            if strap_limits is not None:
+                for key,value in {'target_sequence_N':list(strap_limits.targets_N),
+                        'tolerance_N':.5,'timeout_seconds':strap_limits.timeout_seconds}.items():
+                    if physical.get(key)!=value:errors.append('strap acceptance mismatch: '+key)
+                holds=physical.get('hold_durations_s',physical.get('hold_seconds_per_stage'))
+                if isinstance(holds,(int,float)):holds=[holds,holds]
+                if holds!=list(strap_limits.hold_seconds):errors.append('strap acceptance mismatch: hold durations')
+                completed=physical.get('completed_steps',[])
+                if accepted and len(completed)==2:
+                    intervals=np.diff([start,*completed])/120
+                    if np.any(intervals+1e-10<strap_limits.hold_seconds):
+                        errors.append('strap completion timestamps are shorter than requested holds')
             if accepted and (physical.get("stage_index")!=2 or len(physical.get("completed_steps",[]))!=2):
                 errors.append("strap success did not complete both stages")
         elif task=="wipe_vase":

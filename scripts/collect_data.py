@@ -37,6 +37,9 @@ parser.add_argument(
     type=int,
     default=-1,
 )
+parser.add_argument('--force-sequence', '--force_sequence', dest='force_sequence',
+    type=float, nargs=4, metavar=('F1_N','T1_S','F2_N','T2_S'),
+    help='Strap only: two forces from 0 N to the configured overload limit (default 24 N), with positive hold durations')
 parser.add_argument(
     "--max_seed",
     type=int,
@@ -200,6 +203,10 @@ task_config, task_config_file = get_config(
     default_root=Path(__file__).parent.parent / 'task_config', 
     type='yaml'
 )
+if args_cli.force_sequence is not None:
+    if args_cli.task != 'tension_strap':
+        parser.error('--force-sequence applies only to tension_strap')
+    task_config.setdefault('task_parameters', {})['force_time_sequence'] = args_cli.force_sequence
 
 if task_config.get('render_frequency', 1) == 0:
     args_cli.livestream = 2

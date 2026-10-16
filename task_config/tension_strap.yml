@@ -31,7 +31,8 @@ use_seed: true
 skip_pre_move: false
 task_parameters:
   motion_speed_scale: 3.0
-  target_N: 12.0
+  # [first force in N, first hold in s, second force in N, second hold in s]
+  force_time_sequence: [12.0, 3.0, 18.0, 3.0]
   tolerance_N: 0.5
   overload_N: 24.0
   geometry: bundle
@@ -49,15 +50,12 @@ task_parameters:
   contact_d_hat_m: 0.001
   image_feature_extractor: tracked_flow_rgb_grid
   rupture_profile: notched
-  target_sequence_N:
-  - 12.0
-  - 18.0
-  hold_seconds: 3.0
   policy_timeout_seconds: 60.0
   newton_velocity_tol_m_s: 0.0001
   public_tactile_grasp: true
   controller_deadband_N: 0.02
   live_action_joint_state: true
+  record_public_actions: true
   record_images_every: 1000000000
   controller: marker_rgb
-  calibration: task_config/force_task_rgb/tension_strap_dual_stage.json
+  calibration: task_config/force_task_rgb/tension_strap_full_range.json
