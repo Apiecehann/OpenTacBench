@@ -17,6 +17,7 @@ class TaskCfg(ShadowCfg):
     arm_position: tuple=(-.45,-.09175,0.)
     episode_seconds: float=180.
     action_repeat: int=8
+    tactile_sensor: str='digit'
 
 
 class Task(ShadowTask):

@@ -33,13 +33,14 @@ Phrase-ending notes require longer holds. Sound comes from measured key
 contacts and uses the shared piano synthesizer; no melody audio is prerecorded.
 The hand connects to `panda_link7` by a fixed joint at the Panda flange. Initial
 arm geometry and joint angles agree through Isaac Sim's Lula solver. Playing
-uses motor targets; only reset writes joint state directly. Either support
-uses the same original index GelSight Mini.
+uses motor targets; only reset writes joint state directly. The arm's optional
+tactile backend defaults to DIGIT; the earlier GelSight Mini remains available.
 The arm demo waits for the wrist to settle before bending the index, verifies
 each physical press, releases the finger, then lifts and moves to the next key.
 The index motor uses 6 N m/rad stiffness, 0.20 N m s/rad damping and the existing
-0.9 N m effort limit, with the original 0.50 rad tactile command. Sensor dimensions, optics, calibration and
-musical scoring remain shared. IK increments are scaled together to preserve
+0.9 N m effort limit, with the original 0.50 rad tactile command. Each sensor
+retains its original dimensions and optical settings. Musical scoring uses the
+same thresholds. IK increments are scaled together to preserve
 their Cartesian direction when motor rates are limited.
 A wrist trim bounded to 1.5 mm uses measured key travel to maintain the same
 press criterion across arm poses; it never changes the scoring thresholds.
@@ -50,7 +51,52 @@ Shadow Hand asset. Materials change the appearance; motion and scoring use the
 same physical model. The asset downloads from NVIDIA on first launch.
 `--hand-usd` may select a local copy of the same hand model.
 
-## Index-only calibrated GelSight Mini
+## Integrated DIGIT index tip
+
+The arm's `--tactile` mode uses the original Meta TACTO renderer and DIGIT
+configuration. The scene keeps the Shadow Hand's distal shell and a dark
+sensing surface; the external white sensor housing is omitted. This is an
+integrated visual representation. The original DIGIT gel geometry, camera,
+lighting, reference image and optical noise are retained without scaling.
+The mounting angle faces the gel toward the key at the nominal pressed pose,
+placing contact inside the original camera's field of view.
+
+Install the Isaac tactile environment below first, then run from the repository root:
+
+```bash
+bash scripts/install_piano_digit.sh
+bash scripts/run_piano_tactile.sh --headless --rendering_mode performance --image-width 320 --video
+# Inspect the index tip up close:
+bash scripts/run_piano_tactile.sh --headless --rendering_mode performance --image-width 320 --notes 3 --camera-view fingertip --video --output data/arm_shadow_piano_digit/preview
+```
+
+TACTO runs in its own pinned Python environment under
+`.cache/piano_tactile/digit`, keeping its NumPy/OpenGL dependencies separate from
+Isaac and TacEx. The installer verifies checksums for the original CAD and
+reference image. The renderer is imported directly from the installed TACTO
+distribution, without its unused PyBullet/URDF scene loader.
+
+PhysX drives the keys and rigid sensing surface. Native filtered contact
+forces require the sensing surface itself to touch each key; the index's
+other links cannot press the keys. TACTO uses those real poses and forces
+with its original force-to-appearance model. This backend does not simulate
+FEM gel deformation. The Mini option below retains the original UIPC/FEM backend.
+
+Outputs are `data/arm_shadow_piano_digit/video.mp4`, `digit.mp4`, `tactile.h5`
+and `result.json`. The observation contract remains 111 state values plus
+`tactile/index/rgb`, with one index sensor and no depth/deformation outputs.
+`--camera-view fingertip` changes only the observer camera.
+
+The 320 × 240 headless demonstration passed all 42 notes and produced 42
+matching contact-triggered sounds in 124.37 simulated seconds, with 3731 RGB
+frames at 30 Hz. Its recordings are in `data/arm_shadow_piano_digit/full`;
+the three-note close-up is in `data/arm_shadow_piano_digit/preview`.
+Native contact-point inspection confirmed contact near the gel centre after
+correcting the mount angle. Recorded RGB responds to those contacts, and the
+640 × 480 renderer output also passed a contact/no-contact check.
+The retained Mini/UIPC backend passed a separate one-note regression.
+
+## Original index-only calibrated GelSight Mini
 
 The optional `--tactile` backend mounts the repository's original, unscaled
 GelSight Mini assembly on the Shadow index distal link. It calls
@@ -66,11 +112,11 @@ From the repository root:
 
 ```bash
 bash scripts/install_piano_tactile.sh
-bash scripts/run_piano_tactile.sh --headless --video
+bash scripts/run_piano_tactile.sh --tactile-sensor gsmini --headless --video
 # Use the original factory's standard 320 x 240 full-field resolution:
-bash scripts/run_piano_tactile.sh --headless --video --image-width 320
+bash scripts/run_piano_tactile.sh --tactile-sensor gsmini --headless --video --image-width 320
 # Validated faster rendering profile, with the same physics and sensor API:
-bash scripts/run_piano_tactile.sh --headless --rendering_mode performance --video --image-width 320
+bash scripts/run_piano_tactile.sh --tactile-sensor gsmini --headless --rendering_mode performance --video --image-width 320
 ```
 
 `ISAAC_SIM_ROOT` selects the standalone Isaac installation (default `/isaac-sim`).

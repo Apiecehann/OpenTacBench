@@ -40,11 +40,11 @@ class TactileRecorder:
         self.file.close()
 
 
-def tactile_panel(scene,tactile):
+def tactile_panel(scene,tactile,title='GelSight Mini - index'):
     """Show the complete RGB frame at its aspect ratio, below a separate title."""
     import cv2
     panel=np.full((scene.shape[0],640,3),(18,22,28),dtype=np.uint8)
-    cv2.putText(panel,'GelSight Mini - index',(20,34),
+    cv2.putText(panel,title,(20,34),
         cv2.FONT_HERSHEY_SIMPLEX,.7,(240,244,248),1,cv2.LINE_AA)
     rgb=tactile['rgb']
     height,width=rgb.shape[:2]

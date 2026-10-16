@@ -16,6 +16,8 @@ from ._uipc_keyboard import UipcKeyboard
 
 class IndexTactile:
     image_shape=(480,640)
+    display_name='GelSight Mini - index'
+    physics_backend='uipc'
 
     def __init__(self,task):
         self.task=task
@@ -159,6 +161,9 @@ class IndexTactile:
 
     def update_visual(self):
         self.uipc.update_render_meshes()
+
+    def reset_reference(self):
+        return self.sensor.reset_reference()
 
     def metadata(self):
         optical=self.sensor.sensor.optical_simulator

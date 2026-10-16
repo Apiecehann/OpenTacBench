@@ -31,12 +31,15 @@ class TaskCfg(PianoCfg):
     tactile: bool = False
     tactile_workspace: str = '.cache/piano_tactile/world'
     tactile_image_width: int = 640
+    tactile_sensor: str = 'gsmini'
     tactile_action_rates: tuple = (1., .375, 8.)  # Y m/s, Z m/s, index rad/s
     tactile_command_filter_seconds: float = .04
 
     def __post_init__(self):
+        if self.tactile_sensor not in ('gsmini','digit'):
+            raise ValueError('Choose the original gsmini or digit tactile backend')
         if self.tactile_image_width not in (320,640):
-            raise ValueError('GelSight Mini image width must be 320 or 640')
+            raise ValueError('Tactile image width must be 320 or 640')
         if self.tactile:
             rates=np.asarray(self.tactile_action_rates,dtype=float)
             if (rates.shape!=(3,) or not np.isfinite(rates).all() or (rates<=0).any()
@@ -48,6 +51,11 @@ class TaskCfg(PianoCfg):
         if self.tactile and self.hand_position == (-.011, 0., .110):
             # Offset the wrist for the full Mini housing at the pressed pose.
             self.hand_position = (.003, 0., .1355)
+            if self.tactile_sensor=='digit':
+                # Preserve the front-key position with the shorter fingertip.
+                # Lower the wrist 2.5 mm for a complete physical key stroke
+                # with the face-aligned gel, including the audio threshold.
+                self.hand_position = (-.00946499, 0., .11018281)
 
 
 class Task(PianoTask):
@@ -71,16 +79,26 @@ class Task(PianoTask):
 
     def _create_tactile(self):
         if self.cfg.tactile:
-            from ._index_tactile import IndexTactile
-            self.tactile = IndexTactile(self)
+            if self.cfg.tactile_sensor=='digit':
+                from ._digit_tactile import DigitTactile
+                self.tactile=DigitTactile(self)
+            else:
+                from ._index_tactile import IndexTactile
+                self.tactile = IndexTactile(self)
 
     def _new_score(self):
         holds = HOLD_SECONDS if self.cfg.melody == TWINKLE else tuple(.12 for _ in self.cfg.melody)
         return SingleKeyScore(key_sequence=tuple(m-21 for m in self.cfg.melody), note_hold_seconds=holds)
 
+    def _key_contact_cfg(self):
+        cfg=super()._key_contact_cfg()
+        if self.cfg.tactile and self.cfg.tactile_sensor=='digit':
+            cfg.filter_prim_paths_expr=['/World/Hand/Digit']
+        return cfg
+
     def _create_keyboard(self):
         super()._create_keyboard()
-        if self.cfg.tactile:
+        if self.cfg.tactile and self.cfg.tactile_sensor=='gsmini':
             # UIPC owns gel/key contact and the hinged key dynamics. These
             # articulations mirror measured angles for scene rendering only.
             for key in self.layout:
@@ -138,7 +156,7 @@ class Task(PianoTask):
         self._mount_wrist()
         self._finish_hand()
         if self.cfg.tactile:
-            # UIPC gel supplies index contact; avoid duplicate rigid contact.
+            # The sensing surface supplies index contact; avoid duplicates.
             for prim in Usd.PrimRange(self.stage.GetPrimAtPath('/World/Hand/robot0_ffdistal')):
                 if prim.HasAPI(UsdPhysics.CollisionAPI):
                     UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
@@ -234,7 +252,7 @@ class Task(PianoTask):
         self._demo_y_start=float(self._wrist_state()[0])
         self.max_palm_rotation=0.
         if self.tactile is not None:
-            self.tactile.sensor.reset_reference()
+            self.tactile.reset_reference()
             self.tactile.update_visual()
             return self._observation(), self._info()
         return result
@@ -246,9 +264,11 @@ class Task(PianoTask):
 
     def _key_state(self):
         angles,forces=super()._key_state()
-        if self.tactile is not None:
+        if self.tactile is not None and self.tactile.physics_backend=='uipc':
             angles=self.tactile.keyboard.angles.copy()
             forces=np.abs(self.tactile.key_forces[:,2])
+        elif self.tactile is not None:
+            forces=self.tactile.key_forces()
         return angles,forces
 
     def _audio_forces(self, angles, forces):

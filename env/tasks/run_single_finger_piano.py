@@ -13,8 +13,10 @@ def main():
     parser.add_argument('--wrist',choices=['arm','rail'],default='arm',help='Shadow wrist support: Franka arm (default) or the previous slides')
     parser.add_argument('--notes', type=int, help='Optional Twinkle prefix length for a smoke run; default is all 42 notes')
     parser.add_argument('--video', action='store_true', help='Record RGB video with contact-triggered audio')
-    parser.add_argument('--tactile', action='store_true', help='Only the Shadow index finger: GelSight Mini RGB driven by UIPC FEM and TacEx')
-    parser.add_argument('--image-width',type=int,choices=(320,640),default=640,help='Original GelSight Mini factory resolution; keeps the complete field of view')
+    parser.add_argument('--camera-view',choices=('wide','fingertip'),default='wide',help='Observer framing; leaves tactile optics unchanged')
+    parser.add_argument('--tactile', action='store_true', help='RGB tactile sensing on the Shadow index finger only')
+    parser.add_argument('--tactile-sensor',choices=('digit','gsmini'),help='DIGIT/TACTO fingertip (arm default) or the previous unscaled Mini/UIPC assembly')
+    parser.add_argument('--image-width',type=int,choices=(320,640),default=640,help='Tactile RGB width; keeps the selected sensor\'s complete field of view')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--repetitions', type=int, default=5)
     parser.add_argument('--target-midi', type=int, default=60)
@@ -42,13 +44,14 @@ def main():
         if args.notes is not None and not 1<=args.notes<=len(TWINKLE):
             parser.error('--notes must be between 1 and 42')
         cfg=TaskCfg(device=args.device,hand_usd=args.hand_usd,tactile=args.tactile,record_video=args.video,
-                    tactile_image_width=args.image_width,
+                    tactile_image_width=args.image_width,tactile_sensor=args.tactile_sensor or ('digit' if args.wrist=='arm' else 'gsmini'),
                     melody=TWINKLE[:args.notes] if args.notes is not None else TWINKLE)
     else:
         from .single_finger_piano import Task, TaskCfg
         cfg=TaskCfg(device=args.device,repetitions=args.repetitions,record_video=args.video,
                     target_midi=args.target_midi,hand_usd=args.hand_usd)
-    args.output=args.output or Path('data/arm_shadow_piano' if args.song=='twinkle' and args.wrist=='arm' else
+    args.output=args.output or Path('data/arm_shadow_piano_digit' if args.song=='twinkle' and args.tactile and cfg.tactile_sensor=='digit' else
+        'data/arm_shadow_piano' if args.song=='twinkle' and args.wrist=='arm' else
         'data/shadow_piano_calibrated' if args.tactile else
         'data/shadow_piano' if args.song=='twinkle' else 'data/single_finger_piano')
 
@@ -66,11 +69,13 @@ def main():
             import imageio.v2 as imageio
             import torch
             task.camera.set_world_poses_from_view(
-                torch.tensor([[-.58,.85,.66] if args.song=='twinkle' and args.wrist=='arm' else [-.01,.48,.46]],device=task.sim.device),
-                torch.tensor([[.12 if args.song=='twinkle' and args.wrist=='arm' else .40,task.layout[task.target].position[1],.095]],device=task.sim.device))
+                torch.tensor([[.22,.16,.24] if args.camera_view=='fingertip' else
+                    [-.58,.85,.66] if args.song=='twinkle' and args.wrist=='arm' else [-.01,.48,.46]],device=task.sim.device),
+                torch.tensor([[.46 if args.camera_view=='fingertip' else .12 if args.song=='twinkle' and args.wrist=='arm' else .40,
+                    task.layout[task.target].position[1],.105 if args.camera_view=='fingertip' else .095]],device=task.sim.device))
             writer = imageio.get_writer(args.output/'video.mp4', fps=fps, codec='libx264', quality=8)
             if args.tactile:
-                rgb_writer=imageio.get_writer(args.output/'gelsight.mp4',fps=fps,codec='libx264',quality=8)
+                rgb_writer=imageio.get_writer(args.output/('digit.mp4' if cfg.tactile_sensor=='digit' else 'gelsight.mp4'),fps=fps,codec='libx264',quality=8)
         initial,_=task.reset(seed=0)
         assert task.observation_space.contains(initial)
         print('PIANO_READY',flush=True)
@@ -113,7 +118,7 @@ def main():
                 if args.tactile:
                     from ._tactile_recording import tactile_panel
                     rgb_writer.append_data(observation['tactile']['index']['rgb'])
-                    frame=tactile_panel(frame,observation['tactile']['index'])
+                    frame=tactile_panel(frame,observation['tactile']['index'],task.tactile.display_name)
                 writer.append_data(frame)
                 video_steps.append(task.step_count)
             done = terminated or truncated
@@ -136,7 +141,8 @@ def main():
                           fixed_body_measurement_frame='relative to the moving palm')
         if args.tactile:
             result['tactile']=task.tactile.metadata()
-            result['scoring_source']='UIPC key hinge poses and measured gel/key contact reactions'
+            if task.tactile.physics_backend=='uipc':
+                result['scoring_source']='UIPC key hinge poses and measured gel/key contact reactions'
         if writer is not None:
             writer.close()
             writer = None

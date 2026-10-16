@@ -71,8 +71,7 @@ class Task(gym.Env):
                 width=960, height=640, data_types=['rgb'],
                 spawn=sim_utils.PinholeCameraCfg(focal_length=24., horizontal_aperture=36.,
                                                clipping_range=(.01,10.))))
-        self.key_contacts = ContactSensor(ContactSensorCfg(
-            prim_path='/World/Keyboard/Key_.*/Body', update_period=0., history_length=1))
+        self.key_contacts = ContactSensor(self._key_contact_cfg())
         self.sim.set_camera_view((-.10,-.60,.53), (.44, self.layout[self.target].position[1], .09))
         sim_utils.DomeLightCfg(intensity=2200.).func('/World/Light', sim_utils.DomeLightCfg(intensity=2200.))
         self.sim.reset()
@@ -95,6 +94,9 @@ class Task(gym.Env):
     def _create_tactile(self):
         """Create optional sensors before the first simulation reset."""
         pass
+
+    def _key_contact_cfg(self):
+        return ContactSensorCfg(prim_path='/World/Keyboard/Key_.*/Body',update_period=0.,history_length=1)
 
     def _configure_hand_state(self):
         self._index = self.hand.find_joints('index_joint_1')[0][0]
