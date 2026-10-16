@@ -12,9 +12,17 @@ BOWL_CENTER=np.array([.49,-.34])
 BOWL_RADIUS=.075
 BALL_RADIUS=.030
 BOX_CENTER=np.array([.51,0.])
-BOX_SIZE=np.array([.36,.44])
+BOX_SIZE=np.array([.36,.48])
 WALL_THICKNESS=.012
 DEFAULT_PROFILES=('polished_polymer','rubber','raised_dots')
+TRAY_CENTER=np.array([.40,-.44])
+TRAY_SIZE=np.array([.40,.30])
+
+
+def drop_slot(index):
+    """Public receiving-tray grid; independent of hidden source-ball poses."""
+    if index not in range(12): raise ValueError('Tray has twelve drop slots')
+    return TRAY_CENTER+np.array([(index%4-1.5)*.085,(1-index//4)*.085])
 
 
 @dataclass(frozen=True)
@@ -29,7 +37,7 @@ class BallMaterial:
 
 
 MATERIALS=(
-    BallMaterial('polished_polymer','hard',3.e6,'smooth',(.32,.18,.55)),
+    BallMaterial('polished_polymer','hard',3.e6,'smooth',(.045,.38,.72)),
     BallMaterial('hard_resin','hard',6.e6,'smooth',(.12,.30,.55)),
     BallMaterial('rubber','soft',6.e4,'smooth',(.86,.26,.12)),
     BallMaterial('foam','soft',2.5e4,'smooth',(.90,.48,.22)),
@@ -91,7 +99,7 @@ def ball_mesh(material,subdivisions=3):
     return np.ascontiguousarray(points),tets
 
 
-def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
+def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES,collect_all=False):
     if count not in range(2,13) or target not in CLASSES:
         raise ValueError('Use 2 to 12 balls and a known target class')
     catalogue={m.name:m for m in MATERIALS}
@@ -99,6 +107,7 @@ def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
         raise ValueError('Select distinct known material profiles')
     selected=[catalogue[p] for p in profiles]
     available=[k for k in CLASSES if any(m.kind==k for m in selected)]
+    if collect_all: target=available[0]
     if target not in available: raise ValueError('Target class must be included in the selected materials')
     others=[name for name in available if name!=target]
     kinds=([target,*list(rng.choice(others,count-1,replace=False))] if count<len(available)
@@ -110,8 +119,9 @@ def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
         if not pools.get(kind): pools[kind]=list(rng.permutation([i for i,m in enumerate(selected) if m.kind==kind]))
         materials.append(selected[int(pools[kind].pop())])
     # Randomized cells guarantee clearance even with twelve larger FEM balls.
-    # The controller only knows the box bounds; it does not receive these cells.
-    cells=np.array([(.396+.069*j+(i%2)*.0345,-.06+.06*i) for i in range(3) for j in range(4)])
+    # Rows leave room for the original Mini back shells, as well as the balls.
+    # The controller only knows the workspace rows, never occupied cells/poses.
+    cells=np.array([(.390+.078*j,y) for y in (-.115,0.,.115) for j in range(4)])
     xy=cells[rng.permutation(len(cells))[:count]]+rng.uniform(-.001,.001,(count,2))
     centers=np.c_[xy,[FLOOR_Z+m.radius+.004 for m in materials]]
     return materials,centers
@@ -120,8 +130,8 @@ def sample_scene(rng,count=12,target='textured',profiles=DEFAULT_PROFILES):
 def scan_points(count=12):
     """Known-workspace raster; never receives a ball pose or material label."""
     rows=[]
-    for i,y in enumerate(np.arange(-.06,.061,.03)):
-        xs=np.arange(.390,.641,.005)
+    for i,y in enumerate((-.115,0.,.115)):
+        xs=np.arange(.390,.631,.005)
         if i%2: xs=xs[::-1]
         rows.extend(np.array([x,y,FLOOR_Z+BALL_RADIUS]) for x in xs)
     return rows
@@ -200,14 +210,17 @@ class PickScore:
     success: bool=False
     failure: str=''
 
-    def advance(self,points,opening,target_kind,actual_kind,grasp_verified,dt):
+    def advance(self,points,opening,target_kind,actual_kind,grasp_verified,dt,collect_all=False):
         points=np.asarray(points)
         extent=np.linalg.norm(points[:,:2]-BOWL_CENTER,axis=1).max()
         in_bowl=(extent<BOWL_RADIUS
             and points[:,2].min()>=FLOOR_Z-.003 and points[:,2].max()<.10)
+        if collect_all:
+            in_bowl=(np.all(np.abs(points[:,:2]-TRAY_CENTER)<TRAY_SIZE/2-WALL_THICKNESS)
+                and points[:,2].min()>=FLOOR_Z-.003 and points[:,2].max()<.15)
         released=opening>.036
         if in_bowl and released:
-            if actual_kind!=target_kind:
+            if not collect_all and actual_kind!=target_kind:
                 self.failure='wrong_material'
             if not grasp_verified:
                 self.failure='unverified_grasp'

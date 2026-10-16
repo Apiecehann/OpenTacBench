@@ -349,15 +349,20 @@ bash scripts/run_blind_pick_balls.sh --headless --rendering_mode performance --i
 bash scripts/run_blind_pick_balls.sh --headless --video --balls 9 --target soft
 # Ten balls, retrieve a hard ball, with only two material profiles:
 bash scripts/run_blind_pick_balls.sh --headless --video --balls 10 --target hard --materials polished_polymer rubber
+# Retrieve all twelve balls into the receiving tray:
+bash scripts/run_blind_pick_balls.sh --headless --rendering_mode performance --image-width 320 --video --control-hz 30 --collect-all --output data/blind_pick_balls/all_balls_demo
 ```
 
 The default scene contains twelve balls, four per category, using three profiles:
 polished polymer, rubber and raised dots. Each sphere has a 30 mm base radius
 (previously 24 mm); dots extend up to another 2.5 mm. The box footprint is
-36 × 44 cm (previously 40 × 50 cm), with the original 19 cm rim height.
+36 × 48 cm (previously 40 × 50 cm), with the original 19 cm rim height.
 `--balls 2` through `--balls 12` select the count; 9–12 are useful cluttered
 settings. Jittered, randomly assigned cells keep the larger balls separated.
-The initial cluster stays inside the aperture needed by the wide Panda palm;
+The three source rows are 115 mm apart, with 78 mm between columns, leaving
+room for the Mini sensor backs as well as the sphere surfaces. The search
+uses these public workspace row lines, without receiving occupied cells or
+actual ball poses. The initial cluster stays inside the aperture needed by the wide Panda palm;
 the 19 cm walls are retained. The unused wrist RGB camera housing is disabled
 in this isolated task; both original GelSight Mini assemblies are retained.
 `--materials` selects a subset of the following synthetic profiles, while
@@ -379,6 +384,38 @@ the goal on reset with `task.reset(options={'target_class': 'hard'})`, provided
 that category exists in the already-created scene. Any ball of that category
 can satisfy the task; it must still be lifted clear of the rim and released
 fully inside the bowl. A wrong category fails the episode.
+
+`--collect-all` accepts every selected material and uses a 40 × 30 cm receiving
+tray with twelve public drop slots instead of the single-ball bowl. Success
+requires every distinct ball to have a verified bilateral lift and to be
+released, settled and fully contained in the tray at the same time. Moving a
+previously deposited ball out of the tray invalidates that ball's completion;
+repeatedly picking the same ball cannot satisfy the goal. The source box and
+its 19 cm walls are unchanged. The public goal vector is `[1, 1, 1]` in this
+mode; `--target` applies only to the single-category mode. No hidden source
+poses or material labels are used by either scripted controller.
+Python callers can use `TaskCfg(collect_all=True, episode_seconds=900.)`.
+
+Ball surfaces use USD's native subdivision shading with polished plastic,
+matte rubber and textured material roughness. The original FEM mesh and
+actual contact geometry, including raised dots/ribs, is retained. A soft key
+light makes surface shape and contact shadows visible against the original
+table/background. Free travel,
+near-object approach and carrying are configured in metres per second via
+`TaskCfg.travel_speed`, `approach_speed` and `carry_speed`; defaults are 0.16,
+0.09 and 0.09 respectively. Carrying was previously limited to 0.03 m/s.
+The controller ramps its motion commands and recenters above the balls within
+the box, reserving full rim clearance for transfers across a wall.
+The differential IK uses a 0.12 rad joint-target lead limit. The previous
+0.04 rad limit, combined with the stock 400/80 implicit drives, limited free
+joint tracking near 0.2 rad/s and caused large lag on faster Cartesian paths.
+The robot's original effort/velocity limits remain active. Ordinary moves
+wait for both position and orientation to settle before advancing; contact
+search/probing still transitions on the original sensing-face measurements.
+The Cartesian reference stays within 40 mm of the actual hand, so the
+local differential IK does not accumulate a large error when a joint or
+contact slows motion. The receiving tray sits closer to the arm; its farthest
+drop slot is checked with another 10 mm of XY centering allowance.
 
 The target category is public. The policy observation contains 25 robot/TCP
 state values, the three-way target category and `tactile/left/rgb` and
@@ -441,11 +478,15 @@ vertices with loads directed into the backing. In clutter, a neighboring ball
 can push the back or edge of a pad; those contacts do not establish a grasp.
 Squeeze probes regulate their requested load while settling, rather than
 freezing the first threshold-crossing jaw position as a soft ball relaxes.
-The final grasp approach transitions to force probing when both sensing
-faces are loaded and the TCP is within 6 mm of its target. Other moves keep
-the usual position tolerance. This accommodates contact deflection from
-the physical reaction wrenches without accepting wall or back-shell loads
-as a grasp; the independent lift, release and penetration checks still apply.
+After localizing a contact, the hand reopens and descends to the ball equator
+before low-force jaw centering and the stronger squeeze. A controlled native
+comparison found that closing at the upper cap of a textured sphere loaded
+one gel and the sensor case; the same sphere admitted a bilateral 3 N squeeze
+at equator height. The scan row is public workspace structure; only the
+along-row coordinate comes from tactile localization. Failed probes in
+collection mode retract while reopening and allow another scan-point attempt.
+Scoring still requires a sustained bilateral
+lift, release and containment; wall/back-shell loads cannot satisfy it.
 
 The shared UIPC renderer converts world-space FEM vertices to the mesh's
 current local frame before writing Fabric points. This prevents the arm's
@@ -455,10 +496,26 @@ both rendered gel surfaces with their physical vertices (maximum error below
 0.1 micrometres) and reproduced the floating piece by restoring the old
 coordinate write. Robot, sensor mounting and optical calibration are retained.
 
+The accepted six-retrieval preview is in
+`data/blind_pick_balls/six_retrieved_demo`: six distinct balls were physically
+lifted and released from the twelve-ball seed-0 scene, covering all three
+materials. The 156-second, 30 fps excerpt plays at normal speed. The user
+accepted six retrievals and requested switching to the next experiments;
+the twelve-ball benchmark episode was stopped. Its diagnostics distinguish
+the successful six-retrieval preview from the unfinished all-twelve goal.
+Full twelve-ball completion has not been verified by this recording.
+
 Outputs are `data/blind_pick_balls/video.mp4`, `scene.png` and `result.json`. The video has
 the observer scene and complete left/right tactile RGB images, with titles
 outside the images. Ground-truth labels and positions in `result.json` are
 private diagnostics for validating episodes, separate from observations.
+Recordings default to 30 fps (`--video-fps 60` is also supported), while physics
+and control default to 120 Hz and 60 Hz. `--control-hz 30` reduces camera and
+observation work for longer exports while retaining 120 Hz physics and wrench
+feedback; motion and squeeze commands use elapsed time at either rate.
+The video rate cannot exceed the control rate. Frames are sampled at the selected
+rate and played at that same rate; recording at 30 fps does not accelerate
+the robot. The scene overlay shows simulated time, phase and collection count.
 `--control idle --idle-frames 120` checks the no-action counterfactual.
 
 Native collision regressions are available separately from the blind policy:
@@ -466,6 +523,8 @@ Native collision regressions are available separately from the blind policy:
 ```bash
 # With the standalone tactile Python environment, from the repository root:
 python scripts/check_blind_ball_collisions.py --headless --check both
+python scripts/check_blind_ball_collisions.py --headless --check all
+python scripts/check_blind_ball_collisions.py --headless --check texture
 python -m pytest -q tests/test_blind_ball_collision.py tests/test_blind_pick_balls.py tests/test_uipc_vertex_reset.py
 ```
 
@@ -474,7 +533,21 @@ must block it, and push a hard ball with the sensor's back shell. They use
 known poses only for diagnostic placement and skip RGB rendering while
 checking physical collision and wrench feedback.
 
-The native wall test commanded the TCP to y = -0.28 m while below the rim;
+`--check all` also checks box-corner access and every height of the near/far
+tray-corner route, with 30 Hz control and 120 Hz physics. On the 36 × 48 cm
+layout, forced wall motion stopped near y = -0.125 m with zero measured
+fixture penetration; the back shell pushed a hard ball 113.4 mm with zero
+measured ball/hull penetration. The final tray route completed in 17.33
+simulated seconds, with peak sampled orientation/tracking errors of 2.47
+degrees and 39.2 mm.
+
+A matched route comparison before the final 20 mm tray shift took 17 seconds
+with the faster controller, compared with 27–28 seconds under the former
+joint limit. At 1 Hz sampling, peak orientation/tracking errors fell from
+30 degrees and 322 mm to 2.75 degrees and 37.6 mm. Robot effort/velocity
+limits, sensor geometry and calibration were unchanged for this comparison.
+
+Before the faster controller, the native wall test commanded the TCP to y = -0.28 m while below the rim;
 the palm was blocked near y = -0.104 m, with 0.0694 mm maximum measured
 robot/fixture penetration. The back-shell check pushed a hard ball 95.9 mm
 without sensing-face loads or measured ball-vertex penetration into a rigid
@@ -495,10 +568,11 @@ The recording, scene preview and diagnostics are in
 An earlier native nine-ball idle check switched among all three target categories,
 validated their public goal vectors and instructions, and scored zero for
 each. It also checked the unchanged 19 cm rim and the scaled table geometry.
-The 66 focused CPU checks include layout clearance, material selection,
+The 77 focused CPU checks include layout and full-raster clearance, material selection,
 wrong-category rejection, full-ball placement, sensing-face contact filtering,
 drive deadband/relaxation, convex collision geometry, penetration rejection,
-bilateral contact transitions and shared UIPC reset/render regressions. These
+bilateral contact transitions, distinct-ball collection, bounded tracking
+references and shared UIPC reset/render regressions. These
 checks do not establish retrieval success for every layout and target.
 
 The earlier six-ball, seed-0 textured-target demonstration (24 mm ball radius,

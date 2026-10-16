@@ -22,11 +22,12 @@ from tacex_uipc import UipcInteractiveScene,UipcObject,UipcObjectCfg,UipcSim,Uip
 from tacex.simulation_approaches.fem_based.sim.gelpad_info import SURFACE_FACES
 from envs.sensors.tactile import VisualTactileSensor,create_gelsight_mini_cfg
 from envs._tactile_memory import box_mesh
-from envs._force_task_utils import tetra_faces,write_tet_asset
+from envs._force_task_utils import tetra_faces,write_tet_asset,_material
 from ._blind_ball_models import (
     CLASSES,FLOOR_Z,RIM_Z,BOWL_CENTER,BOWL_RADIUS,BALL_RADIUS,
     BOX_CENTER,BOX_SIZE,WALL_THICKNESS,DEFAULT_PROFILES,PickScore,
     ball_mesh,sample_scene,scan_points,surface_roughness,classify_touch,sphere_center_xy,pad_front_contacts,
+    TRAY_CENTER,TRAY_SIZE,drop_slot,
 )
 from ._blind_ball_collision import RobotBallCollisions,enable_fixture_collision
 
@@ -48,6 +49,13 @@ class TaskCfg:
     image_shape: tuple=(480,640)
     robot_usd: str|None=None
     record_video: bool=False
+    collect_all: bool=False
+    travel_speed: float=.16
+    approach_speed: float=.09
+    carry_speed: float=.09
+    acceleration: float=.6
+    joint_target_limit_rad: float=.12
+    max_tracking_error_m: float=.04
 
 
 class _BallWorld:
@@ -97,6 +105,19 @@ class _BallWorld:
         self.collisions=RobotBallCollisions(task,self.uipc,self.gel_contact,self.fixture_contact)
         self.collisions.fixtures=self.fixture_shapes
 
+    def _setup_ball_looks(self):
+        from pxr import UsdGeom,UsdShade
+        for i,(ball,material) in enumerate(zip(self.balls,self.task.materials)):
+            mesh=UsdGeom.Mesh(self.task.stage.GetPrimAtPath(str(ball.fabric_prim.GetPath())))
+            # Use Hydra's native subdivision and normals on the original
+            # deforming surface. Never alter the physical ball or gel mesh.
+            mesh.GetNormalsAttr().Set([])
+            mesh.GetSubdivisionSchemeAttr().Set('catmullClark')
+            roughness={'polished_polymer':.19,'hard_resin':.22,'rubber':.48,
+                'foam':.82,'raised_dots':.35,'raised_ribs':.42}[material.name]
+            look=_material(self.task.stage,f'/World/BallTask/Looks/Ball_{i}',material.color,roughness)
+            UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(look)
+
     def _object(self,name,points,tets,position,constitution,density,color):
         # Author scene geometry in world coordinates, as UIPC's renderer expects.
         asset=write_tet_asset(Path(self.task.cfg.workspace).parent/'geometry'/(name+'.usda'),
@@ -127,6 +148,14 @@ class _BallWorld:
         for i,angle in enumerate(np.arange(20)*2*np.pi/20):
             center=BOWL_CENTER+.079*np.array([np.cos(angle),np.sin(angle)])
             parts.append(('bowl_rim_'+str(i),(.012,.030,.035),(*center,FLOOR_Z)))
+        if self.task.cfg.collect_all:
+            parts=[p for p in parts if not p[0].startswith('bowl')]
+            cx,cy=TRAY_CENTER; sx,sy=TRAY_SIZE
+            parts.extend([('tray_floor',(sx,sy,FLOOR_Z),(cx,cy,0)),
+                ('tray_front',(sx,t,.025),(cx,cy-(sy-t)/2,FLOOR_Z)),
+                ('tray_back',(sx,t,.025),(cx,cy+(sy-t)/2,FLOOR_Z)),
+                ('tray_left',(t,sy-2*t,.025),(cx-(sx-t)/2,cy,FLOOR_Z)),
+                ('tray_right',(t,sy-2*t,.025),(cx+(sx-t)/2,cy,FLOOR_Z))])
         for name,size,bottom in parts:
             points,tets=box_mesh(size,(1,1,1))
             rotation=np.eye(3)
@@ -137,7 +166,7 @@ class _BallWorld:
                 points=points@rotation.T
             fixture=self._object(name,points,tets,bottom,
                 UipcObjectCfg.AffineBodyConstitutionCfg(kinematic=True),1.e6,
-                (.66,.43,.12) if name.startswith('bowl') else (.12,.19,.23))
+                (.66,.43,.12) if name.startswith(('bowl','tray')) else (.12,.19,.23))
             fixture_contact.apply_to(fixture.uipc_meshes[0])
             enable_fixture_collision(self.task.stage.GetPrimAtPath(fixture.cfg.prim_path))
             self.fixture_shapes.append((name,np.asarray(bottom)+np.array([0.,0.,size[2]/2]),np.asarray(size)/2,rotation))
@@ -154,6 +183,7 @@ class _BallWorld:
             sensor._write_gelpad_vertices(points)
         self.uipc.world.retrieve()
         self.uipc.update_render_meshes()
+        self._setup_ball_looks()
         for sensor in self.sensors: sensor.reset_reference()
         self.uipc.save_frame()
 
@@ -222,8 +252,9 @@ class Task(gym.Env):
 
     def __init__(self,cfg=None,render_mode=None):
         self.cfg=replace(cfg or TaskCfg())
+        self.metadata=dict(type(self).metadata,render_fps=round(1/(self.cfg.physics_dt*self.cfg.action_repeat)))
         self.materials,self._initial_centers=sample_scene(np.random.default_rng(
-            self.cfg.seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles)
+            self.cfg.seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles,self.cfg.collect_all)
         self.render_mode=render_mode
         self.camera=None
         self.physics=None
@@ -241,6 +272,11 @@ class Task(gym.Env):
         plate.spawn.func(plate.prim_path,plate.spawn,translation=plate.init_state.pos)
         light.spawn.texture_file=str(resolve_scene_background_texture('base5'))
         light.spawn.func(light.prim_path,light.spawn)
+        from pxr import UsdLux,UsdGeom,Gf
+        key=UsdLux.DistantLight.Define(self.stage,'/World/BallKeyLight')
+        key.CreateIntensityAttr(650.)
+        key.CreateAngleAttr(18.)
+        UsdGeom.Xformable(key).AddRotateXYZOp().Set(Gf.Vec3f(-10.,-15.,0.))
         cfg=FRANKA_GSMINI_CFG.replace(prim_path='/World/Robot')
         if self.cfg.robot_usd: cfg.spawn.usd_path=self.cfg.robot_usd
         cfg.spawn.articulation_props.enabled_self_collisions=False
@@ -263,7 +299,7 @@ class Task(gym.Env):
             from isaaclab.sensors import Camera,CameraCfg
             self.camera=Camera(CameraCfg(prim_path='/World/ObserverCamera',width=960,height=720,
                 data_types=['rgb'],spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.,horizontal_aperture=36.,clipping_range=(.01,10.))))
+                    focal_length=32. if self.cfg.collect_all else 24.,horizontal_aperture=36.,clipping_range=(.01,10.))))
             self.scene.sensors['observer']=self.camera
         self.scene.clone_environments(copy_from_source=False)
         self.sim.reset()
@@ -284,7 +320,8 @@ class Task(gym.Env):
         self.controller=DifferentialIKController(DifferentialIKControllerCfg(
             command_type='pose',use_relative_mode=False,ik_method='dls'),num_envs=1,device=self.cfg.device)
         self._rest=self.robot.data.default_joint_pos.clone()
-        self.action_space=gym.spaces.Box(np.array([.30,-.45,.032,.008],np.float32),
+        self.action_space=gym.spaces.Box(np.array([.20 if self.cfg.collect_all else .30,
+            -.56 if self.cfg.collect_all else -.45,.032,.008],np.float32),
             np.array([.70,.17,.65,.04],np.float32))
         h,w=self.cfg.image_shape
         rgb_space=lambda:gym.spaces.Dict(rgb=gym.spaces.Box(0,255,(h,w,3),np.uint8))
@@ -307,11 +344,11 @@ class Task(gym.Env):
     def reset(self,*,seed=None,options=None):
         super().reset(seed=seed)
         target=(options or {}).get('target_class',self.cfg.target_class)
-        if target not in {m.kind for m in self.materials}:
+        if not self.cfg.collect_all and target not in {m.kind for m in self.materials}:
             raise ValueError('Target class must be present in this scene')
         self.cfg.target_class=target
         _,self._initial_centers=sample_scene(np.random.default_rng(
-            self.cfg.seed if seed is None else seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles)
+            self.cfg.seed if seed is None else seed),self.cfg.ball_count,self.cfg.target_class,self.cfg.material_profiles,self.cfg.collect_all)
         self.physics.reset(self._initial_centers)
         self.robot.write_joint_state_to_sim(self._rest,torch.zeros_like(self._rest))
         self.robot.set_joint_position_target(self._rest)
@@ -319,8 +356,11 @@ class Task(gym.Env):
         self.step_count=0; self.failure=''; self._done=False; self.trace=[]
         self.controller.reset()
         self._goal=self._tcp()[0][0].cpu().numpy().copy()
-        self._orientation=self._tcp()[1].clone()
         self._opening=.04
+        self._velocity=np.zeros(3)
+        self._carrying=False
+        self._collected=set()
+        self.phase='search'
         self.scores=[PickScore() for _ in self.materials]
         self._held=np.zeros(len(self.materials),int)
         self._grasp_verified=np.zeros(len(self.materials),bool)
@@ -339,6 +379,7 @@ class Task(gym.Env):
         rotation=matrix_from_quat(self.robot.data.body_quat_w[0,self.hand_body])
         self.tcp_offset=(rotation.T@(center-self.robot.data.body_pos_w[0,self.hand_body]).float()).cpu().numpy()
         self._goal=self._tcp()[0][0].cpu().numpy().copy()
+        self._orientation=self._tcp()[1].clone()
         return self._observation(),self._info()
 
     def _physics_step(self):
@@ -350,7 +391,11 @@ class Task(gym.Env):
         joints=self.robot.data.joint_pos[:,self.arm_ids]
         target=self.controller.compute(position,quat,jac,joints)
         limits=self.robot.data.soft_joint_pos_limits[:,self.arm_ids]
-        target=torch.clip(torch.clip(target,joints-.04,joints+.04),limits[...,0],limits[...,1])
+        # With the stock 400/80 implicit drives, a 0.04 rad target lead caps
+        # free joint motion near 0.2 rad/s. Allow the Cartesian path to track
+        # while keeping the asset's original effort and velocity limits.
+        lead=self.cfg.joint_target_limit_rad
+        target=torch.clip(torch.clip(target,joints-lead,joints+lead),limits[...,0],limits[...,1])
         self.robot.set_joint_position_target(target,joint_ids=self.arm_ids)
         self.robot.set_joint_position_target(self._opening,joint_ids=self.finger_ids)
         self.robot.write_data_to_sim()
@@ -374,14 +419,16 @@ class Task(gym.Env):
             self._held[i]=self._held[i]+1 if held else 0
             if self._held[i]*self.cfg.physics_dt>=.15: self._grasp_verified[i]=True
             self.scores[i].advance(points,opening,self.cfg.target_class,material.kind,
-                bool(self._grasp_verified[i]),self.cfg.physics_dt)
+                bool(self._grasp_verified[i]),self.cfg.physics_dt,self.cfg.collect_all)
+            if self.scores[i].success: self._collected.add(i)
             if self.scores[i].failure: self.failure=self.scores[i].failure
         if not np.isfinite(self.robot.data.joint_pos.cpu().numpy()).all(): self.failure='invalid_robot_state'
         if self.step_count*self.cfg.physics_dt>self.cfg.episode_seconds: self.failure='timeout'
         self._done=bool(self.failure or self.check_success())
 
     def check_success(self):
-        return bool(not self.failure and any(s.success for s in self.scores))
+        completed=all(s.success for s in self.scores) if self.cfg.collect_all else any(s.success for s in self.scores)
+        return bool(not self.failure and completed)
 
     def step(self,action):
         if self._done: raise RuntimeError('Call reset() after termination')
@@ -389,9 +436,23 @@ class Task(gym.Env):
         if action.shape!=(4,) or not np.isfinite(action).all(): raise ValueError('Expected finite TCP xyz and per-jaw opening')
         action=np.clip(action,self.action_space.low,self.action_space.high)
         delta=action[:3]-self._goal
-        speed=.0007 if min(self._goal[2],action[2])<RIM_Z+.06 else .002
-        self._goal+=delta*min(1.,speed/max(np.linalg.norm(delta),1e-12))
-        self._opening+=float(np.clip(action[3]-self._opening,-.0005,.0005))
+        dt=self.cfg.physics_dt*self.cfg.action_repeat
+        speed=self.cfg.approach_speed if min(self._goal[2],action[2])<RIM_Z+.06 else self.cfg.travel_speed
+        if self._carrying: speed=min(speed,self.cfg.carry_speed)
+        desired=delta*min(1/dt,speed/max(np.linalg.norm(delta),1e-12))
+        change=desired-self._velocity
+        self._velocity+=change*min(1.,self.cfg.acceleration*dt/max(np.linalg.norm(change),1e-12))
+        movement=self._velocity*dt
+        if np.linalg.norm(movement)>np.linalg.norm(delta): movement=delta; self._velocity=desired
+        candidate=self._goal+movement
+        actual=self._tcp()[0][0].cpu().numpy()
+        lead=candidate-actual
+        # Differential IK linearizes about the current hand. Bound its
+        # reference distance when a joint or contact slows the motion.
+        candidate=actual+lead*min(1.,self.cfg.max_tracking_error_m/max(np.linalg.norm(lead),1e-12))
+        self._velocity=(candidate-self._goal)/dt
+        self._goal=candidate
+        self._opening+=float(np.clip(action[3]-self._opening,-.03*dt,.03*dt))
         for _ in range(self.cfg.action_repeat):
             self._physics_step()
             if self._done: break
@@ -403,12 +464,15 @@ class Task(gym.Env):
         p,q,_=self._tcp()
         state=np.r_[self.robot.data.joint_pos[0].cpu().numpy(),self.robot.data.joint_vel[0].cpu().numpy(),
             p[0].cpu().numpy(),q[0].cpu().numpy()].astype(np.float32)
-        return dict(state=state,target_class=np.asarray([int(c==self.cfg.target_class) for c in CLASSES],np.int8),
+        return dict(state=state,target_class=np.asarray([int(self.cfg.collect_all or c==self.cfg.target_class) for c in CLASSES],np.int8),
             tactile=self.physics.observation())
 
     def _info(self):
         return dict(success=self.check_success() if hasattr(self,'scores') else False,
-            failure=self.failure,physics_step=self.step_count,instruction=TASK_INSTRUCTION.format(target=self.cfg.target_class))
+            failure=self.failure,physics_step=self.step_count,
+            collected_count=len(getattr(self,'_collected',())),
+            instruction=('Retrieve every ball using touch and release all of them into the receiving tray.'
+                if self.cfg.collect_all else TASK_INSTRUCTION.format(target=self.cfg.target_class)))
 
     def render(self):
         if self.camera is None: raise RuntimeError('Attach a recording camera first')
@@ -419,37 +483,41 @@ class Task(gym.Env):
 
     def _go(self,position,opening=None,hold=False,limit=1200,sense=False,contact_tolerance=None):
         position=np.asarray(position,dtype=float)
+        orientation=self._orientation[0].cpu().numpy()
         stable=0
         unloaded=0
         for _ in range(limit):
             if self._done: return self.check_success()
             q=self._opening if opening is None else opening
             command=position
+            self._carrying=hold
             if hold:
                 loads=self._loads()
-                delta=position-self._goal
-                command=self._goal+delta*min(1.,.0005/max(np.linalg.norm(delta),1e-12))
                 # Keep the established grasp. Integrate closing commands as
                 # the gel relaxes; shear-load transients must not open jaws.
-                if loads.min()<2.: q-=.00002
+                if loads.min()<2.: q-=.0012*self.cfg.physics_dt*self.cfg.action_repeat
                 unloaded=unloaded+1 if loads.min()<.12 else 0
-                if unloaded>30:
+                if unloaded*self.cfg.physics_dt*self.cfg.action_repeat>.5:
                     self.failure='grasp_lost'
                     return False
             self.step(np.r_[command,np.clip(q,.008,.04)])
             if sense and self._loads().max()>.07:
                 self._goal=self._tcp()[0][0].cpu().numpy().copy()
+                self._velocity=np.zeros(3)
                 return True
-            error=np.linalg.norm(self._tcp()[0][0].cpu().numpy()-position)
+            actual,quat,_=self._tcp()
+            error=np.linalg.norm(actual[0].cpu().numpy()-position)
+            angle=2*np.arccos(np.clip(abs(np.dot(orientation,quat[0].cpu().numpy())),0.,1.))
             # A loaded physical gripper can settle a few millimetres from
             # its pose target. Only the final grasp approach may transition
             # on bilateral sensing-face contact; walls/case loads do not count.
             if contact_tolerance is not None and error<contact_tolerance and self._loads().min()>.12:
                 self._goal=self._tcp()[0][0].cpu().numpy().copy()
+                self._velocity=np.zeros(3)
                 return True
             if sense and error<.004:
                 return True
-            stable=stable+1 if error<.002 else 0
+            stable=stable+1 if error<.002 and angle<.03 else 0
             if stable>=3 and abs(self._opening-(q if opening is None else opening))<.0006: return True
         self.failure='motion_timeout'; return False
 
@@ -466,7 +534,8 @@ class Task(gym.Env):
 
     def _squeeze(self,load):
         samples=[]
-        for _ in range(320):
+        rate=self.cfg.physics_dt*self.cfg.action_repeat*60
+        for _ in range(int(np.ceil(320/rate))):
             if self._done: return None
             loads=self._loads()
             if loads.min()<.1 and loads.max()>8.:
@@ -476,12 +545,13 @@ class Task(gym.Env):
             # first threshold crossing loses contact as larger soft balls relax.
             if loads.min()>=load*.85 and loads.max()<=load*1.8:
                 samples.append((measured,float(loads.mean())))
-                if len(samples)>=12: return np.median(samples[-8:],axis=0)
+                if len(samples)>=int(np.ceil(12/rate)): return np.median(samples[-max(1,int(np.ceil(8/rate))):],axis=0)
             else:
                 samples=[]
             delta=float(np.clip((load-loads.min())*.00002,-.00004,.00006))
             if loads.max()<.05: delta=.00015
             elif loads.min()<.08: delta=.00010
+            delta*=rate
             # Integrate the target: tiny per-measured-position commands can
             # remain inside the finger drive's friction/tracking deadband.
             q=self._opening-delta
@@ -492,7 +562,7 @@ class Task(gym.Env):
                 i=int(np.argmax(loads))
                 goal+=self.physics.opening_axis(i)*delta
             elif loads.min()>.08 and np.ptp(loads)>load*.3:
-                goal+=self.physics.opening_axis(int(np.argmax(loads)))*min(.00004,np.ptp(loads)*.00002)
+                goal+=self.physics.opening_axis(int(np.argmax(loads)))*min(.00004,np.ptp(loads)*.00002)*rate
             self.step(np.r_[goal,q])
         return None
 
@@ -515,10 +585,14 @@ class Task(gym.Env):
         path=scan_points(self.cfg.ball_count)
         if not self._go(np.r_[path[0][:2],RIM_Z+.10],opening=.04): return
         rejected=[]
+        delivered=0
         above=True
         for point in path:
             if self._done: break
             if any(np.linalg.norm(point[:2]-xy)<.055 for xy in rejected): continue
+            if not above and abs(point[1]-self._goal[1])>.04:
+                if not self._go(np.r_[self._goal[:2],.145],opening=.04): break
+                if not self._go(np.r_[point[:2],.145],opening=.04): break
             if above:
                 if not self._go(np.r_[point[:2],RIM_Z+.10],opening=.04): break
                 above=False
@@ -526,19 +600,31 @@ class Task(gym.Env):
             # pad contact. Search with a narrower gap, then reopen to center.
             if not self._go(point,opening=.024,sense=True): break
             xy=self._locate()
-            invalid=(xy is None or not (.385<xy[0]<.645 and abs(xy[1])<.09)
+            invalid=(xy is None or not (.365<xy[0]<.665 and abs(xy[1])<.145)
                 or any(np.linalg.norm(xy-old)<.04 for old in rejected))
             if invalid:
                 if self._loads().max()>.07:
                     if not self._go(np.r_[self._goal[:2],RIM_Z+.10],opening=.04): break
                     above=True
                 continue
+            # The row is public workspace structure. Surface bumps can bias
+            # a force-normal estimate along that row; keep the palm inside
+            # the measured aperture and use its known scan-row coordinate.
+            xy[0]=np.clip(xy[0],.390,.630)
+            xy[1]=point[1]
             touch_goal=self._goal.copy()
-            if not self._go(np.r_[touch_goal[:2],RIM_Z+.10],opening=.04): break
-            if not self._go(np.r_[xy,RIM_Z+.10],opening=.04): break
-            if not self._go(np.r_[xy,FLOOR_Z+BALL_RADIUS],opening=.026,contact_tolerance=.006): break
+            # Recenter above the balls within the box; full rim clearance is
+            # only needed when transferring across a container wall.
+            if not self._go(np.r_[touch_goal[:2],.145],opening=.04): break
+            if not self._go(np.r_[xy,.145],opening=.04): break
+            # Descend fully open before squeezing at the ball equator. Closing
+            # on its upper cap can load the Mini case instead of both gels.
+            if not self._go(np.r_[xy,FLOOR_Z+BALL_RADIUS],opening=.04): break
+            self.phase='probe'
             kind=self._probe()
-            if kind==self.cfg.target_class:
+            if kind is not None and (self.cfg.collect_all or kind==self.cfg.target_class):
+                self.phase='lift'
+                self.trace[-1]['lift_start_step']=self.step_count
                 if not self._go(np.r_[self._goal[:2],RIM_Z+.10],hold=True): break
                 contact_xy=self._locate()
                 if contact_xy is None:
@@ -546,30 +632,46 @@ class Task(gym.Env):
                 # Center the held contact patch above the bowl. A blind grasp
                 # can hold a sphere off-center, especially on raised ribs.
                 offset=contact_xy-self._tcp()[0][0,:2].cpu().numpy()
-                drop_xy=BOWL_CENTER-offset
+                destination=drop_slot(delivered) if self.cfg.collect_all else BOWL_CENTER
+                drop_xy=destination-offset
                 self.trace[-1]['grasp_offset_xy_m']=offset.tolist()
                 self.trace[-1]['drop_tcp_xy_m']=drop_xy.tolist()
+                self.phase='transfer'
                 if not self._go(np.r_[drop_xy,RIM_Z+.10],hold=True): break
-                if not self._go(np.r_[drop_xy,.075],hold=True): break
-                self._go(np.r_[drop_xy,.075],opening=.04)
-                for _ in range(90):
+                drop_z=.12 if self.cfg.collect_all else .075
+                self.phase='release'
+                if not self._go(np.r_[drop_xy,drop_z],hold=True): break
+                self._go(np.r_[drop_xy,drop_z],opening=.04)
+                self.trace[-1]['release_step']=self.step_count
+                for _ in range(round(1/(self.cfg.physics_dt*self.cfg.action_repeat))):
                     if self._done: break
-                    self.step(np.r_[drop_xy,.075,.04])
-                break
-            rejected.append(xy.copy())
-            self._go(self._goal,opening=.04)
-            if not self._go(np.r_[self._goal[:2],RIM_Z+.10],opening=.04): break
+                    self.step(np.r_[drop_xy,drop_z,.04])
+                delivered+=1
+                if not self.cfg.collect_all or self._done: break
+                rejected.append(xy.copy())
+                if not self._go(np.r_[drop_xy,RIM_Z+.10],opening=.04): break
+                above=True
+                self.phase='search'
+                continue
+            if not self.cfg.collect_all: rejected.append(xy.copy())
+            actual_xy=self._tcp()[0][0,:2].cpu().numpy()
+            if not self._go(np.r_[actual_xy,RIM_Z+.10],opening=.04): break
             above=True
         if not self._done:
             self.failure=self.failure or 'target_not_retrieved'; self._done=True
 
     def diagnostics(self):
-        return dict(self._info(),target_class=self.cfg.target_class,ball_count=len(self.materials),
+        return dict(self._info(),target_class='all' if self.cfg.collect_all else self.cfg.target_class,ball_count=len(self.materials),
             ball_radius_m=BALL_RADIUS,box_size_m=BOX_SIZE.tolist(),box_rim_z_m=RIM_Z,
             material_profiles=list(self.cfg.material_profiles),table_scale=[1.35,1.35,1.],
             materials=[dict(name=m.name,kind=m.kind,youngs_modulus_Pa=m.youngs_modulus,texture=m.texture) for m in self.materials],
             initial_centers_m=self._initial_centers.tolist(),touch_decisions=self.trace,
             grasp_verified=self._grasp_verified.tolist(),
+            collected_indices=sorted(self._collected),collect_all=self.cfg.collect_all,
+            motion_limits=dict(travel_m_s=self.cfg.travel_speed,approach_m_s=self.cfg.approach_speed,
+                carry_m_s=self.cfg.carry_speed,acceleration_m_s2=self.cfg.acceleration,
+                joint_target_limit_rad=self.cfg.joint_target_limit_rad,
+                max_tracking_error_m=self.cfg.max_tracking_error_m),
             final_centers_m=[self.physics.ball_points(i).mean(axis=0).tolist() for i in range(len(self.materials))],
             policy_observation='proprioception, public target class and left/right tactile RGB only',
             backend='PhysX Franka; bundled UIPC FEM balls and gels; project calibrated GelSight Mini Taxim + FEM markers',
