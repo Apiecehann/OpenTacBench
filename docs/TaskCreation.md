@@ -295,6 +295,15 @@ Without this flag, the original post-step tactile recording remains available.
 The arm/Shadow path records 111 state values, four action values and one
 complete index-finger DIGIT RGB frame per 30 Hz control boundary.
 
+The frozen recording path subsequently passed 50 fresh native episodes
+(seeds 1000--1049, 50 successes in 50 attempts). All 36,294 RGB/action pairs
+passed full image, force-hold and timestamp validation. All 50 episodes
+were uploaded with manifest readback, including a full HDF5 download/hash
+comparison for the first episode. Mean native collection time was 94.0
+wall-clock seconds per episode. Runtime source hashes were identical
+throughout and match implementation `38c7534d284fcbc1c0a270d87a69b86ce5f56761`
+after line-ending normalization. These are scripted demonstrations.
+
 Both piano datasets can use the collection/upload queue:
 
 ```bash
@@ -314,8 +323,16 @@ with requested light/light/heavy/heavy/light/light dynamics. All six physical
 press/release events and continuous force holds passed. Its 658 RGB/action
 pairs end at physical step 5259; the final action starts at 5256 and lasts
 three ticks. Full RGB decoding, label alignment and complete HDF5 upload,
-download and SHA-256 comparison passed. This validates that recording path,
-not completion of either 50-episode piano batch.
+download and SHA-256 comparison passed.
+
+The first tool dataset episode (seed 2000) passed D4/F#4/D4/G4/D4/C4 with
+light/heavy/light/heavy/heavy/light dynamics. Each note retained at least
+0.125 seconds in its required physical force band. Both the sequence
+validator and original episode reader passed: 881 saved observations and
+all 3,524 camera/tactile images decoded correctly with observer video
+disabled. Native collection took 486 wall-clock seconds on the L40S;
+this includes scene initialization. This episode verifies the tool's
+current collection path; it does not establish completion of its 50-episode batch.
 
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
@@ -341,7 +358,7 @@ collector, whose app arguments are now registered before parsing.
 
 Development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The final controller uses the three-sample median described above while retaining the original 0.01 m/s solver tolerance and all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
 
-Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 240 by 240 tactile views; blind search contains only the head view and tactile views.
+Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 320 by 240 tactile views; blind search contains only the head view and tactile views.
 
 Configure downstream camera lists to match each task: `blind_pick` has `head` only, plus the two tactile streams. Validate successful raw episodes with `python scripts/validate_memory_task_episode.py path/to/hdf5/0.hdf5 --expect success`. This checks cadence, terminal scoring, image decoding, camera sets, and absence of privileged labels in policy fields.
 
@@ -468,7 +485,7 @@ python scripts/summarize_episode_steps.py data/path/to/runs
 
 The output reports attempts and successes, successful-episode means and sample counts, total physics ticks, preparation ticks, policy ticks, terminal review ticks, saved policy frames, and `saved_total_frames` counted directly from HDF5 rows. Terminal reveal movements after the bulb's physical verdict are excluded from policy timing. Saved frames are not physics ticks; changing recording frequency alone does not accelerate execution.
 
-The measurements above were collected on 2026-10-10 with Isaac Sim 4.5, Isaac Lab 2.1.1, libuipc 0.9.0, and an RTX 4090. The related regression suite passed 150 tests:
+The legacy speed comparisons and `insert_USB` baseline above were collected on 2026-10-10 with Isaac Sim 4.5, Isaac Lab 2.1.1, libuipc 0.9.0, and an RTX 4090. The newer full-range strap and piano dataset checks use Isaac Sim 5.1, Isaac Lab 2.3.2, libuipc 0.9.0, and an L40S. The regression suite for the legacy comparisons passed 150 tests:
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest \
