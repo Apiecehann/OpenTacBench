@@ -195,7 +195,9 @@ def run(args):
                     failures=0
                 else:
                     failures+=1
-                    record['failure']=result.get('error',result.get('validation',{}).get('errors',result.get('terminal_reason')))
+                    record['failure']=(result.get('error') or result.get('validation',{}).get('errors')
+                        or result.get('failure') or result.get('piano_result',{}).get('failure')
+                        or result.get('terminal_reason') or result.get('result'))
                 for r,future in pending:
                     if future.done() and not r.get('uploaded'):
                         r['upload']=future.result()
@@ -235,6 +237,10 @@ def main():
     if args.count<1 or args.max_attempts<args.count or args.start_seed<0 or args.episode_timeout<=0:
         parser.error('Positive episode count/timeout, nonnegative seed and sufficient attempt budget are required')
     args.output=(args.output or REPO/'data/tactile_memory'/args.task/'dataset').resolve()
+    # Background shells can inherit SIGINT ignored. Restore interruption so
+    # collect_one stops its native process group and saves the batch state.
+    signal.signal(signal.SIGINT,signal.default_int_handler)
+    signal.signal(signal.SIGTERM,signal.default_int_handler)
     run(args)
 
 

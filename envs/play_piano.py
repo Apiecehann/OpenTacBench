@@ -47,6 +47,7 @@ class TaskCfg(MemoryTaskCfg):
     piano_require_dynamics = True
     piano_wrong_key_policy = 'fail'
     piano_hold_seconds = .12
+    reset_time_limit = 600.0
 
 
 class Task(MemoryTask):
@@ -66,9 +67,9 @@ class Task(MemoryTask):
         self._key_force_history = deque((np.zeros(88) for _ in range(3)),maxlen=3)
         self.striker_released = False
         self._key_vertex_ids = None
-        # A compliant probe tip makes force controllable at the 60 Hz action
-        # cadence. Resolve deformations more finely than the default 0.4 mm.
-        cfg.uipc_sim.newton.velocity_tol = .01
+        # At 120 Hz this Newton stopping increment is about 8 micrometres,
+        # below the 10-micrometre landing command used by the expert.
+        cfg.uipc_sim.newton.velocity_tol = .001
         super().__init__(cfg, **kwargs)
 
     def _set_sequence(self,cfg,rng):
@@ -281,23 +282,34 @@ class Task(MemoryTask):
                 above=position.copy()
                 above[2]=self._robot_manager.get_gripper_center_pose().p[2]
                 if not self._line_to(above) or not self._line_to(position): break
+            # Resolve the remaining clearance after transport: the compliant
+            # tool can move within the grasp. Use the existing force servo,
+            # with a slower landing before a sustained contact preload.
+            gap=float(self.striker.vertices[:,2].min()-self.keys[key_index].vertices[patch,2].max())
+            landing_z=float(position[2])-max(0.,gap-.002)
+            preloaded=False
+            landing_step=.000010
+            geometry['landing_max_descent_m']=landing_step
             reached = False
-            for _ in range(180):
+            for _ in range(300):
                 # Limit impact on landing; contact hysteresis handles the small
                 # initial load transient independently of the note-force hold.
                 # The first contact can be much stiffer than the settled tip.
                 # Keep each 60 Hz descent below 75 microns so a low initial
                 # force cannot trigger a 250-micron impact on the next tick.
-                dz,control_force = press_delta(
-                    [forces[key_index] for forces in self._key_force_history],
-                    note.force_N,note.tolerance_N)
+                history=[forces[key_index] for forces in self._key_force_history]
+                preloaded=bool(preloaded or min(history)>=min(.8,note.force_N*.5))
+                dz,control_force = press_delta(history,note.force_N,note.tolerance_N)
+                landing=bool(not preloaded and position[2]<=landing_z)
+                if landing:
+                    dz=max(dz,-landing_step)
                 position[2] += dz
                 continued = self.servo_center(position)
                 self.metadata['piano_pressure_trace'].append(dict(step=self.step_count,note=i,
                     key=key_index,force_N=float(self.key_forces[key_index]),
                     controller_force_N=control_force,
                     max_force_N=float(self.key_forces.max()),max_key=int(self.key_forces.argmax()),
-                    target_z=float(position[2])))
+                    target_z=float(position[2]),landing=landing))
                 if not continued:
                     break
                 if (self.score.stable_steps*self.cfg.sim.dt >= note.hold_s

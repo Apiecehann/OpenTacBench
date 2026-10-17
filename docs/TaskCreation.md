@@ -334,6 +334,21 @@ disabled. Native collection took 486 wall-clock seconds on the L40S;
 this includes scene initialization. This episode verifies the tool's
 current collection path; it does not establish completion of its 50-episode batch.
 
+Fresh random sequences exposed contact rebound before a valid force hold:
+seed 2001 failed on its first light C4, and seed 2002 failed on repeated
+A#4 and the heavy-to-light B4 transition. The expert now limits descent to
+10 micrometres within 2 mm of contact until a sustained preload forms,
+then uses the existing force feedback. Newton velocity tolerance is
+0.001 m/s, corresponding to an approximately 8-micrometre stopping increment
+at 120 Hz, rather than the former 83 micrometres. The initialization budget
+is 600 seconds; reset settling frames and physical hold durations are unchanged.
+Both previously failed six-note instructions subsequently passed native
+replays with all twelve force holds exceeding 0.12 seconds. Their 1,238 and
+1,289 saved observations passed the original reader, including all 10,108
+camera/tactile RGB images. Temporary per-action geometry diagnostics were
+removed before production. Optical calibration, force bands, overload and
+release checks retain their original definitions.
+
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
 Both head and wrist cameras show the scene without a cue mask. Policy observations omit actor poses, the seed, and privileged action tags. The scripted demonstrator uses physical key forces and geometry; its success is not a learned-policy memory ablation. Contact descent remains capped at 75 micrometres per 60 Hz update. Its position servo uses the median of the last three 120 Hz force samples, preventing a brief landing impulse from commanding an immediate lift. The scorer and overload detector still use every raw force sample. Self-contact is disabled within the intact stylus because its fine fillets are smaller than the contact barrier; contact with the jaws, keys and table remains active.
@@ -356,7 +371,7 @@ preserves scale values while normalizing float-authored scales to Vec3d for
 Isaac Lab's pose reader. The shared wrapper's `gripper` selector calls the regular
 collector, whose app arguments are now registered before parsing.
 
-Development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The final controller uses the three-sample median described above while retaining the original 0.01 m/s solver tolerance and all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
+Earlier development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The current profile combines the three-sample median with the finer landing and solver settings above, retaining all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
 
 Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 320 by 240 tactile views; blind search contains only the head view and tactile views.
 
@@ -440,6 +455,11 @@ for auditing. The first accepted HDF5 is downloaded and hash-checked;
 each subsequent upload includes remote manifest readback. Completed
 episodes can be resumed with the same source hashes and output path;
 interrupted attempts are preserved for inspection.
+
+The collector restores SIGINT/SIGTERM handling for unattended jobs so an
+interruption stops the owned native process group and saves a stopped batch.
+Physical failure reasons are retained in the progress file. Failed preflight
+recordings remain separate from the requested production episodes.
 
 Audit collected recordings and publish a dataset index with:
 
