@@ -14,7 +14,7 @@ save_pre_move: true
 tactile_video_key: rgb_marker
 observations:
   camera: [rgb]
-  tactile: [rgb_marker]
+  tactile: [depth, marker, rgb_marker]
   embodiment: [joint, ee]
 save_dir: ./data
 start_seed: 0

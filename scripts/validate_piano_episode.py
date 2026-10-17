@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 
 import h5py
 import numpy as np
@@ -13,7 +14,100 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from envs._piano_sequence import PianoSequence,dynamics_profile
 
 
-def validate_piano(source,embodiment,seed=None,*,require_actions=False):
+def validate_rich_tool(source,data,rows,meta,seed):
+    """Check the public streams and independent offline evidence requested for Mini."""
+    errors=[]
+    frames=len(data['step'])
+    required=['phase/sim_step','embodiment/joint','embodiment/ee','piano/target_midi']
+    for side in ('left_tactile','right_tactile'):
+        required.extend(f'tactile/{side}/{kind}' for kind in ('depth','marker','rgb_marker'))
+    missing=[key for key in required if key not in data]
+    if missing:return ['missing rich piano streams: '+', '.join(missing)]
+    if data.attrs.get('piano_recording_schema_version')!=2:
+        errors.append('missing rich piano schema version')
+    if not np.array_equal(data['phase/sim_step'][:],data['step'][:]):
+        errors.append('public phase clock differs from observations')
+    config_path=source/'sensor_config.json'
+    if not config_path.exists():return errors+['missing original sensor configuration']
+    schema=json.loads(config_path.read_text())
+    for side in ('left_tactile','right_tactile'):
+        depth=data[f'tactile/{side}/depth']
+        marker=data[f'tactile/{side}/marker']
+        if depth.shape!=(frames,240,320) or depth.dtype.kind!='f' or depth.attrs.get('units')!='mm':
+            errors.append('expected original 240x320 floating depth in mm: '+side)
+        if marker.shape!=(frames,2,64,2) or marker.dtype.kind!='f' or marker.attrs.get('units')!='pixels':
+            errors.append('expected reference/current (2,64,2) pixel markers: '+side)
+        else:
+            xy=marker[:]
+            if (not np.isfinite(xy).all() or np.any(xy<0)
+                    or np.any(xy[...,0]>=320) or np.any(xy[...,1]>=240)):
+                errors.append('marker coordinates lie outside the original image: '+side)
+            if np.max(np.abs(xy[:,1]-xy[:,0]))<1e-6:
+                errors.append('marker stream has no measured motion: '+side)
+        for start in range(0,frames,32):
+            d=depth[start:start+32]
+            if not np.isfinite(d).all() or np.any(d<24) or np.any(d>34):
+                errors.append('depth is outside original Mini clipping range: '+side)
+                break
+        cfg=schema.get('sensors',{}).get(side,{})
+        if (cfg.get('sensor_type')!='gsmini' or cfg.get('marker_count')!=64
+                or not cfg.get('calibration_sha256')):
+            errors.append('original Mini calibration provenance missing: '+side)
+    ticks=np.asarray([r['physics_step'] for r in rows])
+    if len(ticks)<2 or np.any(np.diff(ticks)!=1):
+        errors.append('full force trace must cover consecutive physics ticks')
+    for row in rows:
+        values=np.asarray(row.get('key_forces_N',[]),float)
+        if values.shape!=(88,) or not np.isfinite(values).all() or np.any(values<0):
+            errors.append('missing 88 finite nonnegative physical key forces')
+            break
+        key=row['target_midi']-21 if row['target_midi']>=21 else -1
+        measured=float(values[key]) if key>=0 else 0.
+        if row.get('target_key_index')!=key or not np.isclose(row.get('measured_target_force_N',-1),measured):
+            errors.append('target force must be key_forces_N[MIDI-21]')
+            break
+        maximum=float(values.max())
+        actual=int(values.argmax())+21 if maximum>=.1 else -1
+        if row['actual_midi']!=actual or not np.isclose(row['actual_force_N'],maximum):
+            errors.append('actual note/force differs from the raw 88-key trace')
+            break
+    if 'piano/key_forces_N' in data:
+        errors.append('privileged 88-key forces must stay outside public observations')
+    command_path=source/'commands'/f'{seed}.jsonl'
+    if not command_path.exists():errors.append('missing actual issued command trace')
+    else:
+        commands=[json.loads(line) for line in command_path.read_text().splitlines() if line]
+        command_steps=[r['physics_step'] for r in commands]
+        n=len(schema.get('command_joint_names',[]))
+        if (not commands or n!=data['embodiment/joint'].shape[1]
+                or np.any(np.diff(command_steps)!=1)
+                or commands[0]['before_step']>data['step'][0]
+                or command_steps[-1]!=data['step'][-1]):
+            errors.append('issued commands do not span the recorded physics interval')
+        for row in commands:
+            values=np.asarray([row.get('qpos_target',[]),row.get('qvel_target',[])],float)
+            if (values.shape!=(2,n) or not np.isfinite(values).all()
+                    or row['physics_step']!=row['before_step']+1):
+                errors.append('invalid original SDK joint command')
+                break
+    video=source/'video'/f'{seed}_success.mp4'
+    if not video.exists():errors.append('missing scene video')
+    else:
+        probe=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-count_frames',
+            '-show_entries','stream=nb_read_frames,avg_frame_rate','-of','json',str(video)],
+            capture_output=True,text=True,check=True)
+        streams=json.loads(probe.stdout).get('streams',[])
+        if (len(streams)!=1 or int(streams[0].get('nb_read_frames',0))!=frames
+                or streams[0].get('avg_frame_rate')!='60/1'):
+            errors.append('scene video must match saved observations at 60 fps')
+        subprocess.run(['ffmpeg','-v','error','-xerror','-i',str(video),'-f','null','-'],
+                       capture_output=True,check=True)
+        if meta.get('piano_audio',{}).get('video_frames')!=frames:
+            errors.append('audio/video clock differs from saved observations')
+    return errors
+
+
+def validate_piano(source,embodiment,seed=None,*,require_actions=False,require_rich=False):
     source=Path(source)
     errors=[]
     if embodiment=='hand':
@@ -130,6 +224,9 @@ def validate_piano(source,embodiment,seed=None,*,require_actions=False):
                         errors.append('nonfinite values: '+name)
                         break
         data.visititems(check_array)
+        if require_rich:
+            if embodiment!='tool':raise ValueError('rich Mini schema applies to tool piano')
+            errors.extend(validate_rich_tool(source,data,rows,meta,seed))
         for key in image_keys:
             images=data[key]
             for i in range(frames):
@@ -160,7 +257,9 @@ if __name__=='__main__':
     parser.add_argument('--embodiment',choices=['hand','tool'],required=True)
     parser.add_argument('--seed',type=int)
     parser.add_argument('--require-actions',action='store_true')
+    parser.add_argument('--require-rich',action='store_true')
     args=parser.parse_args()
-    report=validate_piano(args.source,args.embodiment,args.seed,require_actions=args.require_actions)
+    report=validate_piano(args.source,args.embodiment,args.seed,require_actions=args.require_actions,
+                          require_rich=args.require_rich)
     print(json.dumps(report,indent=2))
     raise SystemExit(0 if report['valid'] else 1)

@@ -1,5 +1,8 @@
 """Pick up a tapping tool and play a requested phrase on an 88-key piano."""
 import numpy as np
+import hashlib
+import json
+from pathlib import Path
 from collections import deque
 from transforms3d.quaternions import mat2quat
 
@@ -77,7 +80,7 @@ class Task(MemoryTask):
         self.sequence=make_sequence(options.get('notes',cfg.piano_notes),count=cfg.piano_note_count,
             dynamics=options.get('dynamics',cfg.piano_dynamics),
             holds=options.get('hold_seconds',cfg.piano_hold_seconds),rng=rng)
-        self.piano_annotations=PianoAnnotations(self.sequence,embodiment='tool')
+        self.piano_annotations=PianoAnnotations(self.sequence,embodiment='tool',record_key_forces=True)
         labels=self.piano_annotations
         notes=tuple(Note(float(f),h,float(t)) for f,h,t in zip(labels.targets,self.sequence.holds,labels.tolerances))
         self.score=PianoScore(cfg.sim.dt,key_sequence=tuple(m-21 for m in self.sequence.midi),
@@ -116,7 +119,7 @@ class Task(MemoryTask):
     def _get_observations(self):
         # Record current contacts before MemoryTask's post-step scoring hook.
         # Reading an observation must not perform tool acquisition or scoring.
-        if self.monitor: self._sample_key_forces()
+        self._sample_key_forces()
         obs=super()._get_observations()
         obs['piano']=self.piano_annotations.update(self.step_count,self.cfg.sim.dt,
             self.score.index,self.key_forces)
@@ -124,9 +127,65 @@ class Task(MemoryTask):
 
     def _step(self,is_save=True):
         before=getattr(self,'step_count',0)
+        record=(is_save and self.mode=='collect' and self.plan_success)
+        if record:
+            # Read the SDK command buffers before the original physics step.
+            # This covers planner, gripper and servo commands without changing
+            # their execution or substituting measured joint positions.
+            robot=self._robot_manager.robot
+            command=dict(before_step=before,phase_id=int(self.phase_id),
+                qpos_target=robot.data.joint_pos_target[0].detach().cpu().tolist(),
+                qvel_target=robot.data.joint_vel_target[0].detach().cpu().tolist())
         super()._step(is_save)
         if self.step_count!=before:
+            self._sample_key_forces()
             self.piano_annotations.update(self.step_count,self.cfg.sim.dt,self.score.index,self.key_forces)
+            if record:
+                command['physics_step']=int(self.step_count)
+                path=self.save_root/'commands'/f'{self.cfg.seed}.jsonl'
+                path.parent.mkdir(parents=True,exist_ok=True)
+                with path.open('a',encoding='utf-8') as stream:
+                    stream.write(json.dumps(command)+'\n')
+
+    def save_to_hdf5(self):
+        super().save_to_hdf5()
+        import h5py
+        sensors={}
+        for name,tactile in self._tactile_manager.tactiles.items():
+            cfg=tactile.sensor.cfg
+            camera=cfg.sensor_camera_cfg
+            marker=cfg.marker_motion_sim_cfg
+            optical=cfg.optical_sim_cfg
+            calibration=Path(optical.calib_folder_path)
+            sensors[name]=dict(sensor_type='gsmini',interface='VisualTactileSensor.get_observations',
+                resolution_width_height=list(camera.resolution),clipping_range_m=list(camera.clipping_range),
+                update_period_s=float(cfg.update_period),data_types=list(cfg.data_types),
+                marker_shape=list(marker.marker_shape),marker_count=int(marker.marker_params.num_markers),
+                marker_sampling='original Mini grid, visibility filtering and repeat-last padding to 64',
+                marker_interval=list(marker.marker_interval),camera_to_surface_m=float(marker.camera_to_surface),
+                real_size_m=list(marker.real_size),calibration_directory=str(calibration),
+                calibration_sha256={str(p.relative_to(calibration)):hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(calibration.rglob('*')) if p.is_file()},
+                gel_modulus_MPa=float(tactile.cfg.gelpad_cfg.constitution_cfg.youngs_modulus),
+                gel_mass_density_kg_m3=float(tactile.cfg.gelpad_cfg.mass_density))
+        schema=dict(version=2,depth_units='mm',depth_meaning='original Mini height_map camera distance',
+            marker_units='pixels',marker_axes='reference/current, marker index, x/y',
+            marker_shape=[2,64,2],force_units='N',force_key_order='MIDI 21 through 108',
+            privileged_force_trace=f'piano_steps/{self.cfg.seed}.jsonl',
+            command_trace=f'commands/{self.cfg.seed}.jsonl',
+            command_meaning='original SDK position/velocity targets applied over (before_step, physics_step]',
+            command_joint_names=list(self._robot_manager.robot.joint_names),
+            sensors=sensors)
+        (self.save_root/'sensor_config.json').write_text(json.dumps(schema,indent=2)+'\n',encoding='utf-8')
+        self.metadata['piano_recording']=schema
+        with h5py.File(self.save_path,'a') as data:
+            data.attrs['piano_recording_schema_version']=2
+            for name in sensors:
+                data[f'tactile/{name}/depth'].attrs['units']='mm'
+                data[f'tactile/{name}/marker'].attrs['units']='pixels'
+                data[f'tactile/{name}/marker'].attrs['axes']='reference/current, marker index, x/y'
+            data['piano'].attrs['privileged_fields']='actual_*; contact; use target_midi as public input'
+        self._save_metadata()
 
     def create_actors(self):
         self.keybed = self.add_box("keyboard_base",(.24,1.315,.034),(.54,0,.006),

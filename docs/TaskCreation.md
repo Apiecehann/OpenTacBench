@@ -308,15 +308,36 @@ Both piano datasets can use the collection/upload queue:
 
 ```bash
 python scripts/collect_tactile_memory.py --task arm_shadow_piano --count 50 --start-seed 1000 --repo-id OWNER/DATASET
-python scripts/collect_tactile_memory.py --task play_piano --count 30 --start-seed 2100 --repo-id OWNER/DATASET
+python scripts/collect_tactile_memory.py --task play_piano --count 30 --start-seed 2200 --output data/tactile_memory/play_piano/dataset-rich --path-in-repo play_piano/mini-depth-marker/episodes --repo-id OWNER/DATASET
 ```
 
 These profiles request six seeded random notes with dynamics judging enabled.
 The tool retains the original HDF5 joint-observation convention; the hand
-adds the issued actions described above. Tool observer-video encoding is
-disabled while original HDF5 camera/tactile RGB and per-tick labels remain
-recorded. Recording validation ignores playback FPS only when observer video
-is disabled; physical and observation clocks remain checked.
+adds the issued actions described above. The current manipulation profile
+also saves both Mini sensors' original `depth`, `marker` and `rgb_marker`
+outputs, head/wrist RGB, joint/EE state, `phase/sim_step`, requested
+`piano/target_midi`, and a scene/tactile video at 60 saved frames per second.
+Depth is the original 240x320 floating camera-distance map in millimetres.
+Each marker frame is `(2,64,2)` in pixels: reference/current, point, x/y.
+The original 9x7 Mini grid retains visibility filtering and repeat-last
+padding to 64; the recorder does not invent additional physical markers.
+
+`piano_steps/<seed>.jsonl` separately retains every physics tick's complete
+`key_forces_N[88]` in ascending MIDI 21--108 order. `target_key_index` is
+MIDI minus 21 and `measured_target_force_N` is that array entry, including
+zero when another key is touched. The existing `target_force_N` is the
+requested force setpoint, not the measured target-key force. Full vectors,
+actual-force labels and geometry diagnostics are privileged offline data.
+`commands/<seed>.jsonl` records the original SDK joint position/velocity
+command buffers before each physics step, including both fingers; it does
+not substitute observed joint states for commands. `sensor_config.json`
+contains sensor parameters, joint ordering and original calibration hashes;
+`result.json` retains source commit and runtime file hashes.
+
+The rich batch uses a separate output/cloud prefix to preserve the accepted
+RGB-only recordings. Run the rich validator with `--require-rich`; audit and
+publish this batch with `--play-piano-batch dataset-rich`. Physical note order,
+force bands, continuous holds, overload and release checks remain unchanged.
 
 The new hand recording path passed native seed 1000 on D4/F#4/A#4/G4/A4/F4
 with requested light/light/heavy/heavy/light/light dynamics. All six physical

@@ -30,7 +30,7 @@ def verify_published_file(api,repo_id,directory,name):
         return
 
 
-def build_catalog(root):
+def build_catalog(root,*,play_piano_batch='dataset'):
     root=Path(root)
     audit_path=root/'recording_audit.json'
     audit=json.loads(audit_path.read_text()) if audit_path.exists() else {}
@@ -38,7 +38,8 @@ def build_catalog(root):
     index=dict(updated_utc=datetime.now(timezone.utc).isoformat(),targets={},
         recording_audit_source_sha256=audit.get('audit_source_sha256'),tasks={})
     for task in TASKS:
-        progress=root/task/'dataset/progress.json'
+        directory=play_piano_batch if task=='play_piano' else 'dataset'
+        progress=root/task/directory/'progress.json'
         batch=json.loads(progress.read_text()) if progress.exists() else {}
         target=batch.get('target',50)
         if isinstance(target,bool) or not isinstance(target,int) or target<1:
@@ -68,6 +69,7 @@ def build_catalog(root):
             target=target,
             accepted=batch.get('collected',0),uploaded=batch.get('uploaded',0),
             collection_status=batch.get('status','pending'),
+            batch_directory=directory,
             source_commit_at_collection=batch.get('source_commit'),
             verified_source_commit=batch.get('verified_source_commit'),
             source_sha256=batch.get('source_sha256',{}),episodes=rows)
@@ -101,6 +103,17 @@ def build_catalog(root):
         '',
         '[Source and task documentation](https://github.com/Apiecehann/OpenTacBench/tree/tactile-memory-tasks)',
         '',f"Updated UTC: {index['updated_utc']}",'']
+    if play_piano_batch!='dataset':
+        card+=['## Manipulation piano depth/marker recording','',
+            'The active `play_piano` batch uses original Mini outputs: `tactile/{left_tactile,right_tactile}/depth` is floating camera distance in mm, and `marker` has shape `(frames,2,64,2)` in image pixels (reference/current, point, x/y). `rgb_marker`, head/wrist RGB, joint/EE state, `phase/sim_step` and requested `piano/target_midi` share the saved-frame clock.',
+            '',
+            '`piano_steps/<seed>.jsonl` contains privileged labels for every physics tick: all 88 measured `key_forces_N` in ascending MIDI 21–108 order, requested `target_key_index=MIDI-21`, and `measured_target_force_N`. The existing `target_force_N` is the requested force setpoint. Actual-force labels and geometry diagnostics must be excluded from policy inputs.',
+            '',
+            '`commands/<seed>.jsonl` preserves actual original SDK joint position/velocity targets and their before/after physics steps, including both gripper joints. `sensor_config.json` records original optical/marker/gel parameters and calibration file hashes; `result.json` records the source commit and runtime hashes. `video/<seed>_success.mp4` shows the scene and both tactile views at the native saved-frame rate with contact-triggered synthesized audio.',
+            '',
+            'The original 9×7 Mini grid retains its original visibility filtering and repeat-last padding to 64 output points; these are the original interface values, not 64 newly fabricated physical markers.',
+            '',
+            'The preceding RGB-only 30 episodes under `play_piano/episodes/2100` through `2129` remain preserved and are excluded from this replacement batch count.','']
     directory=root/'catalog';directory.mkdir(parents=True,exist_ok=True)
     (directory/'dataset_index.json').write_text(json.dumps(index,indent=2),encoding='utf-8')
     (directory/'README.md').write_text('\n'.join(card),encoding='utf-8')
@@ -112,8 +125,9 @@ def main():
     parser.add_argument('--root',type=Path,default=Path('data/tactile_memory'))
     parser.add_argument('--repo-id',required=True)
     parser.add_argument('--publish',action='store_true')
+    parser.add_argument('--play-piano-batch',default='dataset')
     args=parser.parse_args()
-    directory,index=build_catalog(args.root)
+    directory,index=build_catalog(args.root,play_piano_batch=args.play_piano_batch)
     if args.publish:
         from modelscope_hub import HubApi
         api=HubApi()

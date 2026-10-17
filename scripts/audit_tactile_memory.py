@@ -19,10 +19,12 @@ def write_state(path,state):
     temporary.replace(path)
 
 
-def scan(root,tasks,state,target,save):
+def scan(root,tasks,state,target,save,*,play_piano_batch='dataset'):
     complete=True
+    active={task:set() for task in tasks}
     for task in tasks:
-        progress=root/task/'dataset/progress.json'
+        directory=play_piano_batch if task=='play_piano' else 'dataset'
+        progress=root/task/directory/'progress.json'
         if not progress.exists():complete=False;continue
         batch=json.loads(progress.read_text())
         complete&=(batch['status']=='complete' and batch['collected']>=target and batch['uploaded']>=target)
@@ -31,6 +33,7 @@ def scan(root,tasks,state,target,save):
             folder=Path(attempt['path'])
             path=folder/'tactile.h5' if task=='arm_shadow_piano' else folder/'hdf5'/f"{attempt['seed']}.hdf5"
             key=f"{task}/{attempt['seed']:04d}"
+            active[task].add(key)
             info=path.stat();signature=[info.st_size,info.st_mtime_ns]
             previous=state['episodes'].get(key)
             if previous and previous.get('file_signature')==signature:
@@ -42,7 +45,8 @@ def scan(root,tasks,state,target,save):
             save()
             print('RGB_AUDIT',key,'PASS' if report['valid'] else 'FAIL',report['decoded_images'],flush=True)
             if not report['valid']:raise ValueError(key+': '+str(report['errors']))
-    state['counts']={task:sum(k.startswith(task+'/') and v['valid'] for k,v in state['episodes'].items()) for task in tasks}
+    state['counts']={task:sum(state['episodes'].get(k,{}).get('valid',False) for k in keys)
+                     for task,keys in active.items()}
     state['decoded_images']=sum(v['decoded_images'] for v in state['episodes'].values())
     if complete:
         assert all(v>=target for v in state['counts'].values())
@@ -55,6 +59,7 @@ def main():
     parser.add_argument('--root',type=Path,default=REPO/'data/tactile_memory')
     parser.add_argument('--tasks',nargs='+',choices=TASKS,default=TASKS)
     parser.add_argument('--count',type=int,default=50)
+    parser.add_argument('--play-piano-batch',default='dataset',help='Directory under play_piano, e.g. dataset-rich')
     parser.add_argument('--watch',action='store_true',help='Wait for the requested valid/uploaded count in every selected task')
     args=parser.parse_args()
     if args.count<1:parser.error('--count must be positive')
@@ -71,7 +76,7 @@ def main():
     save=lambda:write_state(output,state)
     try:
         while True:
-            complete=scan(root,args.tasks,state,args.count,save)
+            complete=scan(root,args.tasks,state,args.count,save,play_piano_batch=args.play_piano_batch)
             state['status']='complete' if complete else 'running' if args.watch else 'partial'
             save()
             if complete or not args.watch:

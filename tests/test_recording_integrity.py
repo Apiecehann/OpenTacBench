@@ -158,3 +158,25 @@ def test_audit_queue_reuses_unchanged_recordings_and_checks_requested_count(tmp_
     assert state['decoded_images']==2
     monkeypatch.setattr(auditor,'audit_recording',lambda path:pytest.fail('unchanged file was re-audited'))
     assert auditor.scan(tmp_path,['tension_strap'],state,1,lambda:None)
+
+
+def test_replacement_batch_catalog_and_audit_exclude_preserved_rgb_batch(tmp_path):
+    import scripts.audit_tactile_memory as auditor
+    state={'episodes':{'play_piano/2100':dict(valid=True,decoded_images=4)}}
+    for directory,seed in [('dataset',2100),('dataset-rich',2200)]:
+        folder=tmp_path/'play_piano'/directory/'episodes'/str(seed)
+        (folder/'hdf5').mkdir(parents=True)
+        recording=folder/'hdf5'/f'{seed}.hdf5';make_recording(recording)
+        (folder/'result.json').write_text(json.dumps(dict(dataset_accepted=True,validation=dict(valid=True))))
+        attempt=dict(seed=seed,path=str(folder),accepted=True,uploaded=True,upload=dict(
+            path=f'play_piano/{directory}/episodes/{seed}',files={f'hdf5/{seed}.hdf5':dict(
+                bytes=recording.stat().st_size,sha256=hashlib.sha256(recording.read_bytes()).hexdigest())}))
+        (folder.parents[1]/'progress.json').write_text(json.dumps(dict(status='complete',target=1,
+            collected=1,uploaded=1,attempts=[attempt])))
+    assert auditor.scan(tmp_path,['play_piano'],state,1,lambda:None,play_piano_batch='dataset-rich')
+    assert state['counts']=={'play_piano':1} and state['episodes']['play_piano/2100']['valid']
+    (tmp_path/'recording_audit.json').write_text(json.dumps(state))
+    _,catalog=build_catalog(tmp_path,play_piano_batch='dataset-rich')
+    task=catalog['tasks']['play_piano']
+    assert task['published_validated_episodes']==1 and task['episodes'][0]['seed']==2200
+    assert task['batch_directory']=='dataset-rich'

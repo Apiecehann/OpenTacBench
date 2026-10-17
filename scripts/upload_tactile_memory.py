@@ -7,7 +7,8 @@ from pathlib import Path
 
 PATTERNS = ('hdf5/*.hdf5', 'tactile.h5', 'metadata.json', 'result.json',
             'config.yml', 'piano_steps.jsonl', 'piano_steps/*.jsonl', 'checksums.json',
-            'work/*/trace.jsonl', 'work/*/public_actions_*.jsonl')
+            'work/*/trace.jsonl', 'work/*/public_actions_*.jsonl',
+            'sensor_config.json', 'commands/*.jsonl', 'video/*_success.mp4', 'video/*.wav')
 
 
 def episode_files(source):

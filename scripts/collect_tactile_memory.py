@@ -51,7 +51,12 @@ def fingerprint(task):
     elif task=='play_piano':
         files+=['envs/play_piano.py','envs/_memory_task.py','envs/_base_task.py',
                 'envs/_tactile_memory.py','envs/_piano_sequence.py','task_config/play_piano.yml',
-                'envs/_force_task_utils.py','envs/_piano.py','scripts/validate_piano_episode.py']
+                'envs/_force_task_utils.py','envs/_piano.py','envs/_piano_audio.py',
+                'envs/utils/data.py','scripts/validate_piano_episode.py',
+                'third_party/TacEx/source/tacex/tacex/gelsight_sensor.py',
+                'third_party/TacEx/source/tacex/tacex/simulation_approaches/fem_based/mani_skill_sim.py',
+                'third_party/TacEx/source/tacex/tacex/simulation_approaches/fem_based/mani_skill_sim_cfg.py',
+                'third_party/TacEx/source/tacex/tacex/simulation_approaches/fem_based/sim/tactile_sensor_sapienipc_modified.py']
     else:
         files+=['env/tasks/arm_shadow_piano.py','env/tasks/shadow_piano.py',
                 'env/tasks/single_finger_piano.py','env/tasks/_digit_tactile.py','env/tasks/_digit_renderer.py',
@@ -81,8 +86,6 @@ def native_command(args,seed,output):
     else:
         config=yaml.safe_load((REPO/'task_config'/f'{args.task}.yml').read_text())
         config.update(save_dir_exact=str(output),start_seed=seed,max_seed=seed,episode_num=1)
-        # Images remain in HDF5. Only observer video encoding is disabled.
-        config['video_frequency']=0 if args.task=='play_piano' else 2
         if args.task=='tension_strap':
             maximum=float(config['task_parameters']['overload_N'])
             config['task_parameters']['force_time_sequence']=strap_instruction(seed,maximum)
@@ -127,7 +130,7 @@ def collect_one(args,seed,output):
             result=dict(result=meta.get('result','error'),piano_result=meta.get('piano_result',{}))
         if result.get('success') or result.get('result')=='success':
             result['validation']=validate_piano(output,'hand' if args.task=='arm_shadow_piano' else 'tool',
-                seed,require_actions=args.task=='arm_shadow_piano')
+                seed,require_actions=args.task=='arm_shadow_piano',require_rich=args.task=='play_piano')
     result.update(seed=seed,task=args.task,worker_exit_code=code,collection_wall_seconds=time.perf_counter()-started,
                   source_commit=args.source_commit,source_sha256=args.source_sha256,
                   collection_workers=1)
@@ -143,7 +146,8 @@ def collect_one(args,seed,output):
 def upload_one(args,path,seed,roundtrip):
     for attempt in range(3):
         try:
-            return upload_episode(path,args.repo_id,f'{args.task}/episodes/{seed:04d}',roundtrip=roundtrip)
+            prefix=getattr(args,'path_in_repo',None) or f'{args.task}/episodes'
+            return upload_episode(path,args.repo_id,f'{prefix}/{seed:04d}',roundtrip=roundtrip)
         except Exception:
             if attempt==2:raise
             time.sleep(3*(attempt+1))
@@ -156,14 +160,16 @@ def run(args):
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     args.source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip()
     args.source_sha256=fingerprint(args.task)
+    prefix=getattr(args,'path_in_repo',None) or f'{args.task}/episodes'
     state_path=args.output/'progress.json'
     if state_path.exists():
         state=json.loads(state_path.read_text())
-        if state['source_sha256']!=args.source_sha256 or state['repo_id']!=args.repo_id:
+        if (state['source_sha256']!=args.source_sha256 or state['repo_id']!=args.repo_id
+                or state.get('path_in_repo',f'{args.task}/episodes')!=prefix):
             raise ValueError('Resume requires identical task code and upload destination')
     else:
         state=dict(task=args.task,repo_id=args.repo_id,source_sha256=args.source_sha256,
-            source_commit=args.source_commit,attempts=[],status='running',target=args.count)
+            source_commit=args.source_commit,path_in_repo=prefix,attempts=[],status='running',target=args.count)
     state.update(status='running',target=args.count,workers=1)
     state.pop('error',None)
     accepted=[r for r in state['attempts'] if r.get('accepted')]
@@ -230,6 +236,7 @@ def main():
     parser.add_argument('--episode-timeout',type=float,default=1500)
     parser.add_argument('--repo-id',required=True,help='Existing writable ModelScope dataset, OWNER/DATASET')
     parser.add_argument('--output',type=Path)
+    parser.add_argument('--path-in-repo',help='Dataset batch prefix; defaults to TASK/episodes')
     parser.add_argument('--gpu',type=int,default=0)
     parser.add_argument('--isaac-root',type=Path,default=Path(os.environ.get('ISAAC_SIM_ROOT','/isaac-sim')))
     parser.add_argument('--native-python',type=Path,default=REPO/'.venv-tactile/bin/python')

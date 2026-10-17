@@ -87,11 +87,13 @@ def dynamics_profile(sequence, *, embodiment):
 
 class PianoAnnotations:
     """One record per actual physics step; no-contact is distinct from light."""
-    def __init__(self,sequence,*,embodiment):
+    def __init__(self,sequence,*,embodiment,record_key_forces=False):
         self.sequence=sequence
         self.targets,self.thresholds,self.tolerances=dynamics_profile(sequence,embodiment=embodiment)
         self.embodiment=embodiment
         self.records=[]
+        # Full force vectors are privileged offline labels, never observations.
+        self.key_forces_records=[] if record_key_forces else None
 
     def update(self,step,dt,index,forces):
         if self.records and self.records[-1]['physics_step']==step: return self.records[-1]
@@ -114,11 +116,19 @@ class PianoAnnotations:
             actual_dynamic=(2 if force>=threshold else 1) if contact else 0,
             actual_force_N=force,heavy_threshold_N=float(threshold),contact=bool(contact))
         self.records.append(row)
+        if self.key_forces_records is not None:
+            self.key_forces_records.append(values.copy())
         return row
 
     def write_jsonl(self,path):
         with open(path,'w',encoding='utf-8') as stream:
-            for row in self.records: stream.write(json.dumps(row)+'\n')
+            for i,row in enumerate(self.records):
+                if self.key_forces_records is not None:
+                    key=row['target_midi']-21 if row['target_midi']>=21 else -1
+                    values=self.key_forces_records[i]
+                    row=dict(row,key_forces_N=values.tolist(),target_key_index=key,
+                             measured_target_force_N=float(values[key]) if key>=0 else 0.)
+                stream.write(json.dumps(row)+'\n')
 
 
 def configure_piano_task(cfg,config):
