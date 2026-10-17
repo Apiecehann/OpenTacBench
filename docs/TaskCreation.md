@@ -349,6 +349,18 @@ Native image-feedback trials passed `[0, .75, 24, 1.25]`,
 `[24, 1, 0, .75]` and `[4, 1.25, 20, .75]`, with the original force,
 grip, strain, travel and rupture checks enabled.
 
+The frozen full-range profile subsequently passed 50 fresh native episodes
+(physics seeds 100--149, 50 successes in 50 attempts). The sampled forces
+covered 0--24 N in both orders, with independent requested holds from
+0.75 to 1.99 seconds. All episodes passed physical/cadence validation;
+26,295 saved observations and all 157,770 RGB images passed recording
+integrity checks. All 50 episodes were uploaded with manifest readback,
+and the first HDF5 passed a complete download/SHA-256 comparison. These
+are scripted demonstrations with unchanged physical acceptance gates,
+not learned-policy results. Exact runtime source hashes are identical
+across the batch and correspond to the saved strap implementation
+`11ae6b254d96c7110302e1d025935c9f493cea30` after line-ending normalization.
+
 The policy timeout is at least the sum of both requested holds plus 30 seconds
 (60 seconds by default); the frame/action and worker wall-time budgets grow with it. Metadata,
 instructions, per-step physical diagnostics and HDF5 validation use the same
