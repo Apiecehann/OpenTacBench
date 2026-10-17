@@ -18,11 +18,19 @@ class TactileRecorder:
             self.file.attrs['piano_sequence']=json.dumps(task.sequence.as_dict())
             self.file.attrs['piano_dynamic_codes']=json.dumps(dict(idle=0,light=1,heavy=2))
 
-    def append(self,observation):
+    def append(self,observation,action=None):
         arrays={'physics_step':np.asarray(self.task.step_count,dtype=np.int64),
                 'time_s':np.asarray(self.task.step_count*self.task.cfg.physics_dt),
                 'state':observation['state']}
         arrays['tactile/index/rgb']=observation['tactile']['index']['rgb']
+        if action is not None:
+            action=np.asarray(action,dtype=np.float32)
+            if not np.isfinite(action).all():
+                raise ValueError('Recorded actions must be finite')
+            arrays['action']=action
+            self.file.attrs['action_alignment']='observation at t, issued action until the next control boundary or native termination'
+        if self.count and ('action' in arrays)!=('action' in self.datasets):
+            raise ValueError('Every recorded frame must use the same action convention')
         if hasattr(self.task,'piano_annotations'):
             arrays.update({'piano/'+k:np.asarray(v) for k,v in self.task._info()['piano'].items()})
         for name,value in arrays.items():
@@ -41,6 +49,14 @@ class TactileRecorder:
             self.file.flush()
 
     def close(self):
+        if 'action' in self.datasets:
+            steps=self.datasets['physics_step'][:]
+            final_step=int(self.task.step_count)
+            stops=np.minimum(steps+self.task.cfg.action_repeat,final_step)
+            self.file.create_dataset('action_stop_physics_step',data=stops,
+                compression='gzip',compression_opts=2,shuffle=True)
+            self.file.attrs['terminal_physics_step']=final_step
+            self.file.attrs['terminal_time_s']=final_step*self.task.cfg.physics_dt
         self.file.attrs['metadata']=json.dumps(self.task.tactile.metadata())
         self.file.close()
 

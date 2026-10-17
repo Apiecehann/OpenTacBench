@@ -17,7 +17,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from scripts.upload_tactile_memory import upload_episode
 
 REPO=Path(__file__).resolve().parents[1]
-TASKS=('tension_strap',)
+TASKS=('tension_strap','play_piano','arm_shadow_piano')
 
 
 def write_json(path,value):

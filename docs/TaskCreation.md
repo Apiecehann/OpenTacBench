@@ -286,6 +286,37 @@ Default success checks the requested pitch order, contact in the target force ba
 
 Both tasks record separate target and actual dynamics every physics step (0 idle, 1 light, 2 heavy), with note indices, measured force and a simulation timestamp. The tool exposes numeric observation fields under `piano`; the hand uses Gym `info["piano"]`. Recorded HDF5 frames carry aligned `piano/` fields, and JSONL traces retain every physics tick. Video annotations affect the observer view, preserving raw tactile RGB. These fields and overrides apply only to the two piano tasks.
 
+The standalone hand runner accepts `--tactile --record-actions` to record
+the observation at control time `t` together with its issued Gym action.
+`action_stop_physics_step` gives the actual end of each command; the last
+command can end before the nominal eight physics ticks when native success
+or truncation occurs. Terminal physics step/time are stored as attributes.
+Without this flag, the original post-step tactile recording remains available.
+The arm/Shadow path records 111 state values, four action values and one
+complete index-finger DIGIT RGB frame per 30 Hz control boundary.
+
+Both piano datasets can use the collection/upload queue:
+
+```bash
+python scripts/collect_tactile_memory.py --task arm_shadow_piano --count 50 --start-seed 1000 --repo-id OWNER/DATASET
+python scripts/collect_tactile_memory.py --task play_piano --count 50 --start-seed 2000 --repo-id OWNER/DATASET
+```
+
+These profiles request six seeded random notes with dynamics judging enabled.
+The tool retains the original HDF5 joint-observation convention; the hand
+adds the issued actions described above. Tool observer-video encoding is
+disabled while original HDF5 camera/tactile RGB and per-tick labels remain
+recorded. Recording validation ignores playback FPS only when observer video
+is disabled; physical and observation clocks remain checked.
+
+The new hand recording path passed native seed 1000 on D4/F#4/A#4/G4/A4/F4
+with requested light/light/heavy/heavy/light/light dynamics. All six physical
+press/release events and continuous force holds passed. Its 658 RGB/action
+pairs end at physical step 5259; the final action starts at 5256 and lasts
+three ticks. Full RGB decoding, label alignment and complete HDF5 upload,
+download and SHA-256 comparison passed. This validates that recording path,
+not completion of either 50-episode piano batch.
+
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
 Both head and wrist cameras show the scene without a cue mask. Policy observations omit actor poses, the seed, and privileged action tags. The scripted demonstrator uses physical key forces and geometry; its success is not a learned-policy memory ablation. Contact descent remains capped at 75 micrometres per 60 Hz update. Its position servo uses the median of the last three 120 Hz force samples, preventing a brief landing impulse from commanding an immediate lift. The scorer and overload detector still use every raw force sample. Self-contact is disabled within the intact stylus because its fine fillets are smaller than the contact barrier; contact with the jaws, keys and table remains active.

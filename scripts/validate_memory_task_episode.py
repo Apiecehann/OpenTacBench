@@ -28,6 +28,8 @@ def validate_episode(path, expect=None):
         timing = context.get('timing_contract', {})
         for name, wanted in dict(physics_dt_s=1/120, policy_action_repeat=2,
                 save_frequency=2, policy_observation_dt_s=1/60, video_fps=60).items():
+            if name=='video_fps' and timing.get('video_frequency',2)==0:
+                continue  # Disabled observer video has no playback-rate contract.
             if not np.isclose(timing.get(name, -1), wanted):
                 errors.append('timing mismatch: '+name)
         if 'seed' in context or 'cue_kind' in context or len(data.get('actor', {})):

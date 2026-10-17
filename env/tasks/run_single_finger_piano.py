@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--video', action='store_true', help='Record RGB video with contact-triggered audio')
     parser.add_argument('--camera-view',choices=('wide','fingertip'),default='wide',help='Observer framing; leaves tactile optics unchanged')
     parser.add_argument('--tactile', action='store_true', help='RGB tactile sensing on the Shadow index finger only')
+    parser.add_argument('--record-actions',action='store_true',help='Record observation/action pairs before each control step in tactile.h5')
     parser.add_argument('--tactile-sensor',choices=('digit','gsmini'),help='DIGIT/TACTO fingertip (arm default) or the previous unscaled Mini/UIPC assembly')
     parser.add_argument('--image-width',type=int,choices=(320,640),default=640,help='Tactile RGB width; keeps the selected sensor\'s complete field of view')
     parser.add_argument('--output', type=Path)
@@ -36,6 +37,8 @@ def main():
         args.song='sequence'
     if args.tactile and args.song == 'repeated':
         parser.error('--tactile requires the movable Shadow hand')
+    if args.record_actions and not args.tactile:
+        parser.error('--record-actions requires --tactile')
     if args.song=='repeated' and (args.dynamics or args.judge_dynamics or args.hold_seconds is not None):
         parser.error('Dynamics and hold options apply to the movable Shadow hand')
     if args.video or args.tactile:
@@ -94,6 +97,7 @@ def main():
             if args.tactile:
                 rgb_writer=imageio.get_writer(args.output/('digit.mp4' if cfg.tactile_sensor=='digit' else 'gelsight.mp4'),fps=fps,codec='libx264',quality=8)
         initial,_=task.reset(seed=args.seed)
+        previous_observation=initial
         assert task.observation_space.contains(initial)
         print('PIANO_READY',flush=True)
         if args.tactile:
@@ -122,9 +126,13 @@ def main():
                 amount = 0.
             action=(task.demonstration_action(args.control) if args.song!='repeated'
                     else np.array([2*amount-1.],np.float32))
+            if tactile_recorder is not None and args.record_actions:
+                tactile_recorder.append(previous_observation,action=action)
             observation,_,terminated,truncated,info = task.step(action)
+            previous_observation=observation
             if tactile_recorder is not None:
-                tactile_recorder.append(observation)
+                if not args.record_actions:
+                    tactile_recorder.append(observation)
                 if tactile_recorder.count % 30 == 0:
                     print(f'PIANO_TACTILE t={task.step_count*cfg.physics_dt:.2f}s '
                           f'notes={task.score.count}/{task.score.repetitions} '
@@ -154,6 +162,7 @@ def main():
             key_peak_depressions_rad={str(i+21):float(v) for i,v in enumerate(task.key_peak_angles) if v>.001},
             key_peak_forces_N={str(i+21):float(v) for i,v in enumerate(task.key_peak_forces) if v>.01},
             events=task.score.events,
+            record_actions=args.record_actions,
             audio_events=task.audio_contacts.events,
             scoring_source='PhysX key hinge angles and measured key contact forces')
         if args.song!='repeated':
