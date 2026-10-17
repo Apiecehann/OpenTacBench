@@ -35,11 +35,15 @@ def build_catalog(root):
     audit_path=root/'recording_audit.json'
     audit=json.loads(audit_path.read_text()) if audit_path.exists() else {}
     audits=audit.get('episodes',{})
-    index=dict(updated_utc=datetime.now(timezone.utc).isoformat(),target_per_task=50,
+    index=dict(updated_utc=datetime.now(timezone.utc).isoformat(),targets={},
         recording_audit_source_sha256=audit.get('audit_source_sha256'),tasks={})
     for task in TASKS:
         progress=root/task/'dataset/progress.json'
         batch=json.loads(progress.read_text()) if progress.exists() else {}
+        target=batch.get('target',50)
+        if isinstance(target,bool) or not isinstance(target,int) or target<1:
+            raise ValueError('Dataset target must be a positive integer: '+task)
+        index['targets'][task]=target
         rows=[]
         for attempt in batch.get('attempts',[]):
             if not attempt.get('accepted') or not attempt.get('uploaded'):continue
@@ -61,19 +65,24 @@ def build_catalog(root):
                 frames=recording['frames'],decoded_images=recording['decoded_images'],
                 instruction=validation.get('requested_sequence',validation.get('physical',{}).get('force_time_sequence'))))
         index['tasks'][task]=dict(published_validated_episodes=len(rows),
+            target=target,
             accepted=batch.get('collected',0),uploaded=batch.get('uploaded',0),
             collection_status=batch.get('status','pending'),
             source_commit_at_collection=batch.get('source_commit'),
             verified_source_commit=batch.get('verified_source_commit'),
             source_sha256=batch.get('source_sha256',{}),episodes=rows)
-    index['complete']=all(v['published_validated_episodes']==50 for v in index['tasks'].values())
+    targets=set(index['targets'].values())
+    index['target_per_task']=next(iter(targets)) if len(targets)==1 else None
+    index['complete']=all(v['collection_status']=='complete' and
+        v['published_validated_episodes']==v['accepted']==v['uploaded']==v['target']
+        for v in index['tasks'].values())
     card=['# OpenTacBench tactile memory demonstrations','',
         'Native scripted demonstrations with physical success judging and tactile RGB.',
         'Collection is '+('complete.' if index['complete'] else '**in progress**.'),'',
         '| Task | Accepted | Uploaded | Full RGB audit passed | Target |',
         '| --- | ---: | ---: | ---: | ---: |']
     for name,task in index['tasks'].items():
-        card.append(f"| `{name}` | {task['accepted']} | {task['uploaded']} | {task['published_validated_episodes']} | 50 |")
+        card.append(f"| `{name}` | {task['accepted']} | {task['uploaded']} | {task['published_validated_episodes']} | {task['target']} |")
     card+=['',
         'Only episodes that pass native success, data/clock validation, full RGB decoding and upload-manifest readback enter `dataset_index.json`.',
         'The first accepted HDF5 in each task also passes a complete download and SHA-256 comparison.',
@@ -83,7 +92,7 @@ def build_catalog(root):
         '- `play_piano`: Franka + original TacEx GelSight Mini gripper, picked-up tapping tool. Six random C4–B4 notes, required light/heavy force bands, holds and releases. Original HDF5 layout and JPEG tactile images are retained; `piano_steps/` retains every physics tick.',
         '',
         'Each episode directory includes `result.json` and `checksums.json`; legacy tasks also include configuration and metadata. The index gives each HDF5 path, SHA-256, frame count and requested instruction.',
-        'Files under `_checks/` are upload/readback tests and are excluded from the requested 50 episodes per task.',
+        'Files under `_checks/` are development or upload/readback tests and are excluded from the requested per-task totals.',
         'Recorded ground-truth diagnostics are for auditing. These are scripted demonstrations; they do not establish learned-policy performance.',
         '',
         'Native environment: Isaac Sim 5.1, Isaac Lab 2.3.2, libuipc 0.9.0, Torch 2.7 / CUDA 12.8, one NVIDIA L40S. Each episode starts a fresh native scene. Physics is 120 Hz for strap/tool and 240 Hz for the Shadow task; observations/actions are 60 Hz and 30 Hz respectively.',

@@ -110,6 +110,41 @@ def test_catalog_readback_waits_for_new_content_and_retains_exact_hash(tmp_path,
     assert not (tmp_path/'downloaded.md').exists()
 
 
+def test_catalog_completes_with_independent_task_targets(tmp_path):
+    targets={'tension_strap':2,'arm_shadow_piano':2,'play_piano':1}
+    audits={}
+    for task,target in targets.items():
+        attempts=[]
+        for seed in range(target):
+            folder=tmp_path/task/'dataset/episodes'/f'{seed:04d}'
+            folder.mkdir(parents=True)
+            name='tactile.h5' if task=='arm_shadow_piano' else f'hdf5/{seed}.hdf5'
+            recording=folder/name;recording.parent.mkdir(exist_ok=True)
+            make_recording(recording)
+            (folder/'result.json').write_text(json.dumps(dict(dataset_accepted=True,
+                validation=dict(valid=True))))
+            report=audit_recording(recording)
+            report['file_signature']=[recording.stat().st_size,recording.stat().st_mtime_ns]
+            audits[f'{task}/{seed:04d}']=report
+            attempts.append(dict(seed=seed,path=str(folder),accepted=True,uploaded=True,
+                upload=dict(path=f'{task}/episodes/{seed:04d}',files={name:dict(
+                    bytes=recording.stat().st_size,
+                    sha256=hashlib.sha256(recording.read_bytes()).hexdigest())})))
+        (tmp_path/task/'dataset/progress.json').write_text(json.dumps(dict(
+            status='complete',target=target,collected=target,uploaded=target,attempts=attempts)))
+    (tmp_path/'recording_audit.json').write_text(json.dumps(dict(episodes=audits)))
+    directory,index=build_catalog(tmp_path)
+    assert index['complete'] and index['targets']==targets
+    assert index['target_per_task'] is None
+    assert '| `play_piano` | 1 | 1 | 1 | 1 |' in (directory/'README.md').read_text(encoding='utf-8')
+    progress=tmp_path/'play_piano/dataset/progress.json'
+    batch=json.loads(progress.read_text());batch['target']=2
+    progress.write_text(json.dumps(batch))
+    assert not build_catalog(tmp_path)[1]['complete']
+    batch.update(target=1,status='running');progress.write_text(json.dumps(batch))
+    assert not build_catalog(tmp_path)[1]['complete']
+
+
 def test_audit_queue_reuses_unchanged_recordings_and_checks_requested_count(tmp_path,monkeypatch):
     import scripts.audit_tactile_memory as auditor
     folder=tmp_path/'tension_strap/dataset/episodes/0000'

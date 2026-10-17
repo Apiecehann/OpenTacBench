@@ -308,7 +308,7 @@ Both piano datasets can use the collection/upload queue:
 
 ```bash
 python scripts/collect_tactile_memory.py --task arm_shadow_piano --count 50 --start-seed 1000 --repo-id OWNER/DATASET
-python scripts/collect_tactile_memory.py --task play_piano --count 50 --start-seed 2000 --repo-id OWNER/DATASET
+python scripts/collect_tactile_memory.py --task play_piano --count 30 --start-seed 2100 --repo-id OWNER/DATASET
 ```
 
 These profiles request six seeded random notes with dynamics judging enabled.
@@ -331,8 +331,8 @@ light/heavy/light/heavy/heavy/light dynamics. Each note retained at least
 validator and original episode reader passed: 881 saved observations and
 all 3,524 camera/tactile images decoded correctly with observer video
 disabled. Native collection took 486 wall-clock seconds on the L40S;
-this includes scene initialization. This episode verifies the tool's
-current collection path; it does not establish completion of its 50-episode batch.
+this includes scene initialization. This earlier pilot remains separate from
+the subsequently frozen production batch.
 
 Fresh random sequences exposed contact rebound before a valid force hold:
 seed 2001 failed on its first light C4, and seed 2002 failed on repeated
@@ -348,6 +348,19 @@ replays with all twelve force holds exceeding 0.12 seconds. Their 1,238 and
 camera/tactile RGB images. Temporary per-action geometry diagnostics were
 removed before production. Optical calibration, force bands, overload and
 release checks retain their original definitions.
+
+The frozen tool profile then passed 30 fresh native episodes, seeds
+2100--2129, with no failed attempts and required dynamics judging enabled.
+All 39,142 saved observations and 156,568 camera/tactile RGB images passed
+validation. All 30 episodes were uploaded with manifest readback; the first
+HDF5 also passed a full cloud download/SHA-256 comparison. Mean native
+collection time was 753.5 wall-clock seconds. Runtime source hashes stayed
+identical and match saved implementation
+`116d4b32ebc70529127596d51bf4ea15fde439fb`. The requested tool batch was
+reduced from 50 to 30 after these successes; the next interrupted attempt
+is preserved separately and is excluded from the dataset. Together with
+50 strap and 50 arm/Shadow episodes, the requested dataset contains 130
+accepted, uploaded and fully RGB-audited demonstrations.
 
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
@@ -473,7 +486,10 @@ finiteness and nonempty image streams. It reuses an audit only while the
 recording size, modification timestamp and audit implementation remain
 unchanged. Add `--watch` to audit alongside collection until the selected
 tasks each have 50 validated and uploaded episodes. Without `--tasks`, it
-watches the strap and both piano datasets. The catalog includes only
+watches the strap and both piano datasets. Use `--count` to select another
+audit minimum. The catalog reads each batch's own `target`, so a completed
+50/50/30 collection is represented with those three separate targets.
+The catalog includes only
 episodes that pass collection validation, upload readback and this image
 audit; `_checks/` upload tests do not count toward the requested totals.
 Publishing checks both remote index files against their exact local hashes,
