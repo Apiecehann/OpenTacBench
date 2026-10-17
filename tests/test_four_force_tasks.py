@@ -79,7 +79,9 @@ def test_task_files_compile_and_have_no_retired_module_imports():
         assert "/root/" not in source
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.ImportFrom) and node.level == 1:
-                assert node.module in {"_base_task", "_force_task_utils", "utils.transforms"}
+                allowed={"_base_task", "_force_task_utils", "utils.transforms"}
+                if name=="bulb_tightening":allowed.add("robot.aloha_assets")
+                assert node.module in allowed
     bulb = (ROOT / "envs/bulb_tightening.py").read_text()
     assert 'scripts/generate_screw_light_bulb_assets.py' in bulb
     assert (ROOT / "scripts/generate_screw_light_bulb_assets.py").is_file()

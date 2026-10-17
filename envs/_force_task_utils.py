@@ -394,15 +394,22 @@ def configure_final_task(cfg, parameters, *, max_policy_seconds):
     cfg.step_lim = int(round(max_policy_seconds * POLICY_HZ))
     cfg.max_save_frames = max(int(cfg.max_save_frames), cfg.step_lim + 1200)
 
+def force_action_indices(manager):
+    """Public qpos order is the named arm chain followed by one gripper DOF."""
+    import torch
+    return torch.cat((torch.as_tensor(manager._arm_ids,dtype=torch.long),
+                      torch.as_tensor(manager._gripper_ids,dtype=torch.long)[:1]))
+
+
 def execute_joint_target(task, arm=None, gripper=None, *, ticks=ACTION_REPEAT):
     """The expert uses exactly the public position-action path."""
     import torch
     manager = task._robot_manager
-    q = manager.get_observations(['joint'])['joint'][:8].clone()
+    q = manager.get_observations(['joint'])['joint'][force_action_indices(manager)].clone()
     if arm is not None:
-        q[:7] = torch.as_tensor(arm, dtype=q.dtype, device=q.device).reshape(-1)
+        q[:-1] = torch.as_tensor(arm, dtype=q.dtype, device=q.device).reshape(-1)
     if gripper is not None:
-        q[7] = float(gripper)
+        q[-1] = float(gripper)
     executed, success = task.take_action(q, action_type='qpos', force=True, action_repeat=int(ticks))
     return bool(executed and not task.check_early_stop() and task.plan_success), bool(success)
 
@@ -733,7 +740,7 @@ def timing_context(task):
         'video_frequency': int(cfg.video_frequency),
         'video_fps': float(task.video_handler.fps),
         'joint_position_units': 'arm radians, fingers meters',
-        'joint_action_semantics': 'absolute qpos, first8 of recorded9 joints',
+        'joint_action_semantics': 'absolute qpos, named arm joints then first gripper joint',
         'joint_action_start_state': 'live_physx' if getattr(cfg,'live_action_joint_state',False) else 'observation_cache',
         'quaternion_order': 'wxyz',
         'position_units': 'meters',
@@ -742,6 +749,10 @@ def timing_context(task):
         'actor_surface_cache_enabled': bool(getattr(cfg, 'cache_actor_surfaces', False)),
         'same_step_tactile_depth_reuse': bool(getattr(cfg, 'reuse_same_step_tactile_depth', False)),
     }
+    manager = getattr(task, '_robot_manager', None)
+    if manager is not None:
+        result['action_joint_names'] = manager._arm_joint_names + manager._gripper_joint_names[:1]
+        result['action_joint_indices'] = force_action_indices(manager).detach().cpu().tolist()
     tactiles = getattr(getattr(cfg, 'robot', None), 'tactiles', [])
     result['gel_modulus_mpa'] = {
         str(t.name): float(t.gelpad_cfg.constitution_cfg.youngs_modulus)
@@ -763,8 +774,9 @@ def append_public_action(task, target, initial, before_step, phase_id, requested
         if hasattr(value,"detach"):value=value.detach().cpu().numpy()
         return np.asarray(value,dtype=float).reshape(-1)
     q=array(target);q0=array(initial)
-    if q.shape!=(8,) or q0.shape!=(8,) or not np.isfinite(np.r_[q,q0]).all():
-        raise ValueError("Public action evidence must contain eight finite joint targets")
+    size=len(task._robot_manager._arm_ids)+1
+    if q.shape!=(size,) or q0.shape!=(size,) or not np.isfinite(np.r_[q,q0]).all():
+        raise ValueError(f"Public action evidence must contain {size} finite joint targets")
     row=dict(before_step=int(before_step),after_step=after,
              requested_repeat=int(requested_repeat),qpos=q.tolist(),initial_qpos=q0.tolist())
     path=Path(str(path).format(seed=int(getattr(cfg,"seed",0))))
@@ -790,8 +802,10 @@ def original_action_schedule(steps,joints,start,command_path,*,terminal_step=Non
     or success feedback enters command generation. Each source segment is named.
     """
     steps=np.asarray(steps,dtype=int);joints=np.asarray(joints,dtype=float)
-    if joints.shape!=(len(steps),8) or not np.isfinite(joints).all():
-        raise ValueError("Recorded observations must contain finite eight-joint rows")
+    if (joints.ndim!=2 or joints.shape[0]!=len(steps) or joints.shape[1] not in (7,8)
+            or not np.isfinite(joints).all()):
+        raise ValueError("Recorded control rows require six or seven arm joints plus one gripper")
+    width=joints.shape[1]
     if len(steps)<2 or np.any(np.diff(steps)<=0):raise ValueError("Invalid observation clock")
     path=Path(command_path);raw=path.read_bytes()
     commands=[json.loads(line) for line in raw.splitlines() if line.strip()]
@@ -800,7 +814,7 @@ def original_action_schedule(steps,joints,start,command_path,*,terminal_step=Non
     def add(end,target,kind,repeat=None):
         nonlocal cursor
         target=np.asarray(target,dtype=float)
-        if target.shape!=(8,) or not np.isfinite(target).all():raise ValueError("Invalid original target")
+        if target.shape!=(width,) or not np.isfinite(target).all():raise ValueError("Invalid original target")
         ticks=int(end-cursor) if repeat is None else int(repeat)
         if not 1<=ticks<=40:raise ValueError("Action evidence has an invalid interval")
         if end<=cursor or end-cursor>ticks:raise ValueError("Action evidence clock is inconsistent")
@@ -846,14 +860,16 @@ def take_force_task_action(task, action, *, action_type="qpos", force=True,
     if task.take_action_cnt >= task.cfg.step_lim or task.eval_success:
         return True, task.eval_success
     target = torch.as_tensor(action, dtype=torch.float32, device=task.device).reshape(-1)
-    if target.shape != (8,) or not bool(torch.isfinite(target).all()):
-        raise ValueError("Force-task actions must contain eight finite joint targets")
+    manager = task._robot_manager
+    indices = force_action_indices(manager)
+    if target.shape != (len(indices),) or not bool(torch.isfinite(target).all()):
+        raise ValueError(f"Force-task actions require {len(indices)} finite joint targets")
     task.take_action_cnt += 1
     manager = task._robot_manager
     if getattr(task.cfg, "live_action_joint_state", True):
-        initial = manager.robot.root_physx_view.get_dof_positions()[0, :8].clone()
+        initial = manager.robot.root_physx_view.get_dof_positions()[0, indices].clone()
     else:
-        initial = manager.get_observations(["joint"])["joint"][:8].clone()
+        initial = manager.get_observations(["joint"])["joint"][indices].clone()
     step, phase = task.step_count, task.phase_id
     try:
         for index in range(repeat):
@@ -1006,6 +1022,9 @@ def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
                  repo / "envs/utils/data.py", repo / "scripts" / ("collect_data.py" if mode == "collect" else "eval_policy.py")]
         if name == 'tension_strap':
             files += [repo / 'envs/_strap_sequence.py', repo / 'scripts/validate_final_task_episode.py']
+        if config.get("task_parameters",{}).get("embodiment")=="aloha_vx300s":
+            files += [repo/"envs/robot/aloha_assets.py",repo/"envs/robot/robot_cfg.py"]
+            files += [p for p in (repo/"assets/embodiments/aloha").rglob("*") if p.is_file()]
         if deploy.get("policy_name") == "openpi":
             files += list((repo / "policy/openpi").glob("*.py"))
         calibration = config.get("task_parameters", {}).get("calibration")

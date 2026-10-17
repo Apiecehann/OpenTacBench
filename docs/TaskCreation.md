@@ -394,9 +394,49 @@ Configure downstream camera lists to match each task: `blind_pick` has `head` on
 bash collect_data.sh play_piano play_piano 0
 ```
 
+## ALOHA bulb tightening
+
+`bulb_tightening_aloha.yml` selects a genuine six-axis ALOHA 2 ViperX 300S
+carrier for the existing `bulb_tightening` task:
+
+```bash
+bash collect_data.sh bulb_tightening bulb_tightening_aloha 0
+```
+
+The pinned Menagerie source, original joint axes/ranges/inertias, six meshes
+and license are in `assets/embodiments/aloha`. Isaac Lab's original
+`MjcfConverter` imports the arm. The standard TacEx Mini gripper, gel pads,
+camera-relative transforms and optical calibration are retained. A visible
+35 mm mounting flange clears the Mini palm's rear geometry from the wrist;
+native self collision remains enabled. The raised home pose keeps the
+gripper clear before approach. Generated USD, URDF and Curobo files live
+under `.cache/aloha_gsmini` and rebuild when their source inputs change.
+
+Public absolute joint actions have seven values: the six named ALOHA joints
+and one gripper opening. Raw joint observations have eight values because
+both fingers are recorded. Action metadata gives the actual joint names
+and observation indices. The existing Franka profile retains its original
+eight-value control convention.
+
+The new profile retains physical probing, 1.5--3 actual formal turns,
+0.12 +/- 0.012 Nm seating torque, damage checks and at least 132 stable
+physical ticks, followed by explicit END. Its scripted demonstrator uses
+the existing diagnostic-force controller; it is not a trained RGB policy.
+
+The integrated ALOHA profile passed a complete native seed-0 episode on
+Isaac Sim 5.1 / Isaac Lab 2.3.2: 1.651 actual formal turns, 0.11739 Nm final
+torque and 174 stable physical ticks, after the controller's 180-tick hold.
+The explicit END occurred at physical step 2373. The exported 1,259 frames
+passed physical/cadence validation, and all 7,554 camera/tactile RGB images
+decoded successfully. The original 60 fps video fully decoded and matched
+the HDF5 frame count. Its 937 recorded public calls contain seven finite
+joint targets each and stop at END; ordinary atom/delay segments retain the
+existing observation recording convention. This is one validated native
+demonstration, not a measured success rate across randomized episodes.
+
 ## Motion speed and episode length
 
-`tension_strap` and `bulb_tightening` accept `task_parameters.motion_speed_scale` from 1 to 3. The code default is 1, preserving legacy timing. This parameter changes motion timing while retaining the 120 Hz physics clock, 60 Hz policy/recording cadence, force/torque acceptance thresholds, and required holds. Strap motion accelerates free gripper closure and tapers back to its original controller near contact and the force target. Bulb motion accelerates unloaded wrist return, unloaded recentering, free closure after the direction probe, and terminal opening/lift. The initial grip and reversible tactile probe retain their original timing. A separate bulb `thread_speed_scale` (1--3, default 1) accelerates free thread travel while retaining the 60 Hz command cadence and half-turn endpoint. Sensed seating load switches back to the original slow increments. The final stationary submission and physical hold durations remain unchanged. The standard bulb YAML selects motion scale 3 and thread scale 2.
+`tension_strap` and `bulb_tightening` accept `task_parameters.motion_speed_scale` from 1 to 3. The code default is 1, preserving legacy timing. This parameter changes motion timing while retaining the 120 Hz physics clock, 60 Hz policy/recording cadence, force/torque acceptance thresholds, and required holds. Strap motion accelerates free gripper closure and tapers back to its original controller near contact and the force target. Bulb motion accelerates unloaded wrist return, unloaded recentering, free closure after the direction probe, and terminal opening/lift. The initial grip and reversible tactile probe retain their original timing. A separate bulb `thread_speed_scale` (1--3, default 1) accelerates free thread travel while retaining the 60 Hz command cadence and half-turn endpoint. Sensed seating load switches back to the original slow increments. Explicit END and physical hold checks remain unchanged. The standard bulb YAML selects motion scale 3 and thread scale 2.
 
 Bulb default sampling now targets nominal 1.55--2.88 turns, leaving margin for actual seat/probe compliance; physical success requires 1.5--3 measured formal turns. Previously sampled seeds already within the new nominal range retain their geometry, including comparison seeds 0, 1 and 2. Out-of-range default samples are redrawn; explicit `nominal_turns` must be within 1.5--3. Direction and lead estimation still use tactile image responses rather than the hidden thread specification.
 
@@ -495,9 +535,12 @@ audit; `_checks/` upload tests do not count toward the requested totals.
 Publishing checks both remote index files against their exact local hashes,
 allowing brief branch-cache propagation after updates.
 
-Bulb submission still requires 180 stationary physics ticks, while physical
-success requires at least 132 stable ticks; changing `policy_hold_steps`
-alone does not shorten the stationary submission gate.
+Bulb policies submit through the explicit public `finish_episode()` API;
+stationary joint commands do not submit END. The scripted profile requests
+180 controller hold ticks, while physical success independently requires at
+least 132 stable ticks. Validation checks that the explicit verdict matches
+the first terminal physics step, and still accepts historical recordings
+that used the former 180-tick stationary submission interface.
 
 The standard `tension_strap.yml` profile selects scale 3. On paired seeds 0, 1, and 2, both scale 1 and scale 3 succeeded in all three episodes. Total physics ticks were 2833/2870/2911 before and 1458/1490/1594 after: the mean fell from 2871.3 to 1514 (47.3%). Mean policy ticks fell from 2807.3 to 1450, and saved policy frames from 1403 to 724. Total recorded frames are 711/727/779 (mean 739). Both force stages still require three seconds of sustained physical acceptance. Comparing recorded end-effector pose and jaw width after normalized path-length alignment gave maximum position differences of 0.186/0.066/0.083 mm and orientation differences of 0.100/0.038/0.021 degrees. This is a three-seed regression result, not a large-scale success-rate estimate.
 

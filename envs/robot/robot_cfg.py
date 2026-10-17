@@ -14,6 +14,8 @@ from ..sensors.tactile import TactileCfg, create_tactile_cfg
 class RobotCfg:
     robot: ArticulationCfg = None
     tactiles: list[TactileCfg] = []
+    robot_type: str | None = None
+    planner_yaml: str | None = None
 
     gripper_offset: float = 0.131 # in m
     gripper_max_qpos: float = 0.039 # in m

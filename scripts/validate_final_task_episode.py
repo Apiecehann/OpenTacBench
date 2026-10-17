@@ -122,9 +122,16 @@ def validate_final(episode,reference=None,expect=None):
             if bool(meta.get("bulb_accepted"))!=accepted or bool(meta.get("bulb_failure"))==accepted:
                 errors.append("bulb verdict differs between metadata and HDF5")
             if accepted:
-                if (meta.get("bulb_submission_source")!="stationary_joint_command"
-                        or meta.get("bulb_submission_stationary_steps",0)<180):
-                    errors.append("bulb expert did not submit through the same public stationary END")
+                submission=meta.get("bulb_submission_source")
+                if submission=="policy_submitted_end":
+                    if not len(terminal) or meta.get("bulb_physical_verdict_step")!=int(steps[terminal[0]]):
+                        errors.append("bulb explicit END differs from the first terminal physics step")
+                elif submission=="stationary_joint_command":
+                    # Historical recordings predate the explicit policy END API.
+                    if meta.get("bulb_submission_stationary_steps",0)<180:
+                        errors.append("legacy bulb stationary submission is shorter than 180 ticks")
+                else:
+                    errors.append("bulb is missing its public END submission")
                 hand=meta.get("thread_physical_spec",{}).get("handedness",0)
                 if not (physical.get("probe_complete") and 1.5<=physical.get("formal_net_turns",0)<=3
                         and meta.get("bulb_hold_steps",0)>=132

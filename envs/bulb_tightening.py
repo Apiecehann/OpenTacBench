@@ -1316,6 +1316,18 @@ def box_mesh(width, depth, height, counts=(5,5,5)):
 # Bulb tightening
 
 class Task(LegacyBulbTask):
+    def load_robot_and_sensors(self,cfg):
+        cfg=super().load_robot_and_sensors(cfg)
+        embodiment=self.params.get('embodiment','franka_panda')
+        if embodiment=='aloha_vx300s':
+            if cfg.tactile_sensor_type!='gsmini' or getattr(cfg,'dense_gelpad',False):
+                raise ValueError('ALOHA uses the original standard GelSight Mini assembly')
+            from .robot.aloha_assets import with_aloha_arm
+            cfg.robot=with_aloha_arm(cfg.robot)
+        elif embodiment!='franka_panda':
+            raise ValueError(f'Unknown bulb embodiment: {embodiment}')
+        return cfg
+
     def __init__(self,cfg,**kwargs):
         self.params=task_parameters(cfg)
         from ._force_task_utils import motion_speed_scale
@@ -1340,7 +1352,10 @@ class Task(LegacyBulbTask):
         offset=np.asarray(self.params.get('socket_xy_offset_m',rng.uniform(-.02,.02,2)),float)
         if offset.shape!=(2,) or not np.all(np.isfinite(offset)) or np.any(np.abs(offset)>.02):
             raise ValueError('Socket XY displacement must stay within +/- 2 cm')
-        self.socket_position=np.r_[np.array([.55,0.])+offset,.002]
+        self.socket_xy_center=np.asarray(self.params.get('socket_xy_center_m',[.55,0.]),float)
+        if self.socket_xy_center.shape!=(2,) or not np.isfinite(self.socket_xy_center).all():
+            raise ValueError('Socket XY center must contain two finite coordinates in meters')
+        self.socket_position=np.r_[self.socket_xy_center+offset,.002]
         self.seat_top=float(self.params.get('seat_top_m',.022))
         self.target_torque=float(self.params.get('target_torque_Nm',.120))
         self.torque_tolerance=float(self.params.get('torque_tolerance_Nm',.012))
@@ -1490,7 +1505,9 @@ class Task(LegacyBulbTask):
         self.metadata['constraint_contract']='socket and lower seat fixed; bulb free after first grasp including regrasp'
         self.metadata['remaining_geometric_turns']=self.thread_spec.nominal_free_travel_m/self.thread_spec.lead_m
         self.metadata['thread_physical_spec']=dict(self.thread_spec.__dict__)
-        self.metadata['socket_xy_offset_m']=(self.socket_position[:2]-[.55,0.]).tolist()
+        self.metadata['socket_xy_center_m']=self.socket_xy_center.tolist()
+        self.metadata['socket_xy_offset_m']=(self.socket_position[:2]-self.socket_xy_center).tolist()
+        self.metadata['embodiment']=self.params.get('embodiment','franka_panda')
         self._probe_seen_positive=False;self._probe_seen_negative=False;self._probe_physical_complete=False
         self._physical_probe=ReversibleThreadProbe(track_grasp_origin=True)
         self._physical_trace_path=self.work/'physical_trace.jsonl'
@@ -1839,10 +1856,12 @@ class Task(LegacyBulbTask):
             command[-1]=float(joints[-1])+(target-float(joints[-1]))*alpha
             executed,accepted=execute_joint_target(self,arm=command,ticks=2)
             if not executed or accepted:return False
-        self.metadata.setdefault('empty_wrist_positions',[]).append(dict(
-            start_step=begin,end_step=self.step_count,joint7_target_rad=target,
-            gripper_depth_mm=self._read_bulb_depths(),
-            object_was_unconstrained=True))
+        names=getattr(manager,'_arm_joint_names',None)
+        record=dict(start_step=begin,end_step=self.step_count,wrist_target_rad=target,
+            wrist_joint_name=names[-1] if names else f'arm_joint{len(manager._arm_ids)}',
+            gripper_depth_mm=self._read_bulb_depths(),object_was_unconstrained=True)
+        if len(manager._arm_ids)==7:record['joint7_target_rad']=target
+        self.metadata.setdefault('empty_wrist_positions',[]).append(record)
         return True
 
     def _read_bulb_depths(self):
