@@ -461,6 +461,22 @@ demonstration, not a measured success rate across randomized episodes.
 
 Bulb default sampling now targets nominal 1.55--2.88 turns, leaving margin for actual seat/probe compliance; physical success requires 1.5--3 measured formal turns. Previously sampled seeds already within the new nominal range retain their geometry, including comparison seeds 0, 1 and 2. Out-of-range default samples are redrawn; explicit `nominal_turns` must be within 1.5--3. Direction and lead estimation still use tactile image responses rather than the hidden thread specification.
 
+The strap supports `task_parameters.strap_color_mode: blue` (default, all three
+bands blue) or `tricolor` (left to right in strap-local X: blue, yellow, red).
+Grip tabs stay dark in both modes. This changes appearance only; geometry,
+stiffness, force targets, tactile sensing and acceptance rules stay the same.
+The selected mode is retained after rupture and saved in `strap_parameters`.
+Set it in `task_config/tension_strap.yml`, or override it for one collection run:
+
+```bash
+python scripts/collect_data.py tension_strap tension_strap --strap-color-mode blue --headless
+python scripts/collect_data.py tension_strap tension_strap --strap-color-mode tricolor --headless
+```
+
+Color regions use the mesh's local rest coordinates. The former world-space
+offset subtraction classified every band as blue after the renderer switched
+to local mesh points; intact and broken surfaces now share material bindings.
+
 The strap accepts exactly two force/time stages through
 `task_parameters.force_time_sequence: [F1_N, T1_s, F2_N, T2_s]`, or
 `--force-sequence F1_N T1_s F2_N T2_s` on `scripts/collect_data.py`.

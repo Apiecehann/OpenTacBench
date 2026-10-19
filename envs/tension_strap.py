@@ -12,6 +12,7 @@ from ._force_task_utils import (
     image_features,
     read_rgb,
     sample_physics,
+    strap_color_palette,
     task_parameters,
     tetra_faces,
     write_tet_asset,
@@ -273,7 +274,7 @@ def rupture(task):
                     attr.Set(usdrt.Vt.IntArray(values))
             rest_surface = extract_surface(template)
             task.presentation.color_strap(mesh,
-                np.asarray(rest_surface.positions().view()).reshape(-1,3))
+                np.asarray(rest_surface.positions().view()).reshape(-1,3)-task.base)
             # Keep the actual broken FEM surface and its changing normals in
             # USD, as with the verified vase pad renderer. The old Fabric mesh
             # otherwise retains stale/empty normals after a topology change.
@@ -293,31 +294,15 @@ def rupture(task):
             live.SetNormalsInterpolation('vertex')
             material=UsdShade.Material(stage.GetPrimAtPath(root+'/Looks/Elastomer'))
             UsdShade.MaterialBindingAPI.Apply(live.GetPrim()).Bind(material)
-            # Explicit per-face material bindings survive runtime topology
-            # replacement in RTX; a dynamic displayColor reader previously
-            # rendered most of the new surface black after the handoff.
             local_rest=task.mesh_points[indices]
-            centers=local_rest[faces].mean(axis=1)
-            band=(centers[:,2]>.01601)&(centers[:,2]<.13199)
-            which=np.full(len(faces),3,dtype=int)
-            band_centers=np.asarray(task.params.get('band_centers_m',[-.025,0.,.025]))
-            which[band]=np.abs(centers[band,0,None]-band_centers[None,:]).argmin(axis=1)
-            palette=np.asarray([[50,126,207],[253,230,64],[253,77,54],[55,58,62]],float)/255.
-            palette=np.where(palette<=.04045,palette/12.92,((palette+.055)/1.055)**2.4)
-            from ._force_task_utils import _material
-            binding=UsdShade.MaterialBindingAPI.Apply(live.GetPrim())
-            color_counts=[]
-            for color_index,color in enumerate(palette):
-                face_ids=np.flatnonzero(which==color_index).astype(np.int32)
-                color_counts.append(int(len(face_ids)))
-                if not len(face_ids):
-                    raise RuntimeError('Broken strap lost a required color region')
-                mat=_material(stage,root+f'/Looks/BrokenStrap{color_index}',tuple(color),.78)
-                subset=binding.CreateMaterialBindSubset(f'color_{color_index}',Vt.IntArray.FromNumpy(face_ids))
-                UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(mat)
+            which=task.presentation.color_strap(live, local_rest)
+            color_counts=np.bincount(which, minlength=4).tolist()
+            if not all(color_counts):
+                raise RuntimeError('Broken strap lost a required color region')
             task.metadata['strap_broken_surface_colors']={
                 'method':'constant-color material subsets by rest-mesh face location',
-                'faces_per_color_blue_yellow_red_tab':color_counts,
+                'mode':task.params['strap_color_mode'],
+                'faces_per_region_left_middle_right_tab':color_counts,
                 'rest_local_bounds_m':[local_rest.min(0).tolist(),local_rest.max(0).tolist()]}
             np.savez_compressed(task.work/'broken_surface_mapping.npz',
                 live_points=xyz.copy(),faces=faces.copy(),volume_indices=indices.copy(),
@@ -398,6 +383,8 @@ def strap_mesh():
 class Task(BaseTask):
     def __init__(self, cfg, **kwargs):
         self.params = task_parameters(cfg)
+        self.params.setdefault('strap_color_mode', 'blue')
+        strap_color_palette(self.params)  # Validate before starting the scene.
         from ._force_task_utils import motion_speed_scale
         self.motion_speed_scale = motion_speed_scale(self.params)
         self.params.setdefault('public_tactile_grasp',True)

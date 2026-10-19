@@ -36,6 +36,8 @@ task_parameters:
   tolerance_N: 0.5
   overload_N: 24.0
   geometry: bundle
+  # blue: all three bands blue; tricolor: blue/yellow/red. Grip tabs stay dark.
+  strap_color_mode: blue
   mesh_path: assets/objects/task_assets/tactile_first_suite/elastic_strap_bundle.npz
   strap_self_contact: true
   band_centers_m:

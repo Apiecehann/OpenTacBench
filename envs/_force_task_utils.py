@@ -561,9 +561,20 @@ def _rounded_box(stage, path, center, size, radius, mat):
     _bind(mesh.GetPrim(),mat)
     return mesh
 
+def strap_color_palette(parameters):
+    """Linear RGB for the left/middle/right bands and the dark grip tabs."""
+    mode = parameters.get('strap_color_mode', 'blue')
+    if mode not in ('blue', 'tricolor'):
+        raise ValueError("strap_color_mode must be 'blue' or 'tricolor'")
+    palette = np.asarray([[50,126,207], [253,230,64], [253,77,54], [55,58,62]], dtype=float) / 255.
+    if mode == 'blue':
+        palette[:3] = palette[0]
+    return np.where(palette <= .04045, palette / 12.92, ((palette + .055) / 1.055) ** 2.4)
+
+
 class ForceTaskScene:
     def __init__(self,task,kind):
-        from pxr import Sdf, Usd, UsdGeom, UsdShade
+        from pxr import Usd, UsdGeom
         self.task=task
         import omni.usd
         stage=omni.usd.get_context().get_stage()
@@ -598,31 +609,36 @@ class ForceTaskScene:
                             _bind(prim,rubber)
                             if task.params.get('geometry') == 'bundle':
                                 self.color_strap(mesh)
-                                reader=UsdShade.Shader.Define(stage,root+'/Looks/Elastomer/Color')
-                                reader.CreateIdAttr('UsdPrimvarReader_float3')
-                                reader.CreateInput('varname',Sdf.ValueTypeNames.Token).Set('displayColor')
-                                reader.CreateOutput('result',Sdf.ValueTypeNames.Float3)
-                                shader=UsdShade.Shader(stage.GetPrimAtPath(root+'/Looks/Elastomer/Shader'))
-                                shader.GetInput('diffuseColor').ConnectToSource(reader.ConnectableAPI(),'result')
             else:
                 _rounded_box(stage,root+'/socket_mount',(.55,0.,.001),(.125,.125,.002),.014,metal)
 
 
     def color_strap(self, mesh, rest_points=None):
-        from pxr import Vt
-        task=self.task
-        points=(np.asarray(mesh.GetPointsAttr().Get(),dtype=float)
-                if rest_points is None else np.asarray(rest_points))
-        faces=np.asarray(mesh.GetFaceVertexIndicesAttr().Get(),dtype=int).reshape(-1,3)
-        centers=points[faces].mean(axis=1)-task.base
-        palette=np.asarray([[50,126,207],[253,230,64],[253,77,54],[55,58,62]],dtype=float)/255.
-        palette=np.where(palette<=.04045,palette/12.92,((palette+.055)/1.055)**2.4)
-        which=np.full(len(faces),3,dtype=int)
-        band=(centers[:,2]>.01601)&(centers[:,2]<.13199)
-        band_centers=np.asarray(task.params.get('band_centers_m',[-.031,0.,.031]))
-        which[band]=np.abs(centers[band,0,None]-band_centers[None,:]).argmin(axis=1)
+        """Bind colors by rest position in strap-local coordinates, even after rupture."""
+        from pxr import UsdShade, Vt
+        task = self.task
+        points = (np.asarray(mesh.GetPointsAttr().Get(), dtype=float)
+                  if rest_points is None else np.asarray(rest_points))
+        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=int).reshape(-1, 3)
+        # USD/Fabric points are already local. Subtracting task.base here would
+        # shift every band toward the left-hand (blue) region.
+        centers = points[faces].mean(axis=1)
+        palette = strap_color_palette(task.params)
+        which = np.full(len(faces), 3, dtype=int)
+        band = (centers[:, 2] > .01601) & (centers[:, 2] < .13199)
+        band_centers = np.asarray(task.params.get('band_centers_m', [-.025, 0., .025]))
+        which[band] = np.abs(centers[band, 0, None] - band_centers[None, :]).argmin(axis=1)
         mesh.CreateDisplayColorAttr(Vt.Vec3fArray.FromNumpy(palette[which].astype(np.float32)))
         mesh.GetDisplayColorPrimvar().SetInterpolation('uniform')
+        # Constant per-region materials also survive RTX topology replacement.
+        binding = UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+        root = task.scene.env_prim_paths[0] + '/force_task_presentation'
+        for index, color in enumerate(palette):
+            material = _material(mesh.GetPrim().GetStage(), root + f'/Looks/Strap{index}', tuple(color), .78)
+            face_ids = np.flatnonzero(which == index).astype(np.int32)
+            subset = binding.CreateMaterialBindSubset(f'color_{index}', Vt.IntArray.FromNumpy(face_ids))
+            UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)
+        return which
 
 
 # Force task tracking
