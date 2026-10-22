@@ -40,6 +40,7 @@ class TaskCfg(PianoCfg):
     piano_note_count: int = 6
     piano_require_dynamics: bool = True
     piano_wrong_key_policy: str = 'fail'
+    piano_continue_on_note_failure: bool = False
     piano_hold_seconds: object = None
     piano_seed: int | None = None
 
@@ -123,7 +124,21 @@ class Task(PianoTask):
         return SingleKeyScore(key_sequence=tuple(m-21 for m in self.sequence.midi),
             note_hold_seconds=self.sequence.holds,require_dynamics=self.cfg.piano_require_dynamics,
             force_targets=tuple(labels.targets),force_tolerances=tuple(labels.tolerances),
-            wrong_key_policy=self.cfg.piano_wrong_key_policy)
+            wrong_key_policy=self.cfg.piano_wrong_key_policy,
+            continue_on_note_failure=self.cfg.piano_continue_on_note_failure)
+
+    def finish_piano_note_attempt(self, index):
+        """End one safely released attempt; continue to the next requested note."""
+        if not self.cfg.piano_continue_on_note_failure:
+            raise RuntimeError('Per-note completion is disabled for this task')
+        if self._done and index >= self.score.count:
+            raise RuntimeError('Cannot finish an attempt after the episode ended')
+        angles,_=self._key_state()
+        if np.any(angles>=self.score.press_angle):
+            raise RuntimeError('Release pressed keys before finishing a note attempt')
+        self.score.finish_attempt(index,self.step_count)
+        self._done=self.score.finished or bool(self.score.failure)
+        return self._info()
 
     def _key_contact_cfg(self):
         cfg=super()._key_contact_cfg()
@@ -388,9 +403,10 @@ class Task(PianoTask):
 
     def _info(self):
         result=super()._info()
-        result.update(song='Twinkle Twinkle Little Star' if self.sequence.midi==TWINKLE else 'Custom piano sequence',notes_completed=self.score.count,
+        result.update(song='Twinkle Twinkle Little Star' if self.sequence.midi==TWINKLE else 'Custom piano sequence',notes_completed=self.score.successful_notes,
+            notes_attempted=self.score.count,notes_failed=self.score.count-self.score.successful_notes,
             total_notes=self.score.repetitions,hand_model='Shadow Hand',single_finger='index',
-            wrist_motion='driven Y/Z slides',next_midi=None if self.score.success else self.score.active_key+21)
+            wrist_motion='driven Y/Z slides',next_midi=None if self.score.finished else self.score.active_key+21)
         result['piano_sequence']=self.sequence.as_dict()
         result['piano_instruction']=self.sequence.instruction()
         result['require_dynamics']=self.cfg.piano_require_dynamics

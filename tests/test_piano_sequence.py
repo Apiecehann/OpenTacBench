@@ -107,6 +107,45 @@ def test_hand_wrong_key_retry_does_not_advance_the_sequence():
     assert score.success
 
 
+def test_hand_partial_score_continues_after_wrong_key_and_counts_successes():
+    score=SingleKeyScore(key_sequence=(39,40,41),continue_on_note_failure=True)
+    wrong=np.zeros(88);wrong[42]=.04
+    score.advance(wrong,np.ones(88),.01,1)
+    assert score.count==0 and not score.failure
+    score.advance(wrong,np.ones(88),.01,2)
+    assert score.mistakes==1
+    score.finish_attempt(0,3)
+    assert score.count==1 and score.successful_notes==0 and not score.finished
+    correct=np.zeros(88);correct[40]=.04
+    for step in range(4,14): score.advance(correct,np.ones(88),.01,step)
+    for step in range(14,25): score.advance(np.zeros(88),np.zeros(88),.01,step)
+    score.finish_attempt(1,30)  # Successful release is already consumed.
+    assert score.count==2 and score.successful_notes==1
+    score.finish_attempt(2,31)  # An attempted note with no valid contact.
+    assert score.finished and not score.success and score.failure=='partial_score'
+    assert score.successful_notes==1
+    assert [e['kind'] for e in score.events]==['miss','press','release','miss']
+    assert [e['attempt_index'] for e in score.events]==[0,1,1,2]
+
+
+def test_hand_partial_score_sustained_overforce_is_one_failed_attempt():
+    score=SingleKeyScore(key_sequence=(39,40),force_targets=(.35,.5),
+        force_tolerances=(.07,.07),require_dynamics=True,
+        continue_on_note_failure=True)
+    angles=np.zeros(88);forces=np.zeros(88)
+    angles[39]=.04;forces[39]=.6
+    for step in range(12): score.advance(angles,forces,.01,step)
+    assert score.count==0 and score.successful_notes==0 and not score.failure
+    score.finish_attempt(0,13)
+    assert score.events[0]['reason']=='wrong_note_force'
+    assert score.count==1
+    angles[:]=forces[:]=0.;angles[40]=.04;forces[40]=.5
+    for step in range(14,24): score.advance(angles,forces,.01,step)
+    for step in range(24,35): score.advance(np.zeros(88),np.zeros(88),.01,step)
+    assert score.finished and score.successful_notes==1
+    assert score.failure=='partial_score'
+
+
 def test_yaml_overrides_only_apply_to_piano_configs():
     other=SimpleNamespace()
     configure_piano_task(other,{'piano_notes':['C#','C']})

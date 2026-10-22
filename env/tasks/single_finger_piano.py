@@ -242,7 +242,8 @@ class Task(gym.Env):
                      self.score.count/self.cfg.repetitions, float(self.score._armed)].astype(np.float32)
 
     def _info(self):
-        return dict(success=self.score.success, failure=self.score.failure, presses=self.score.count,
+        return dict(success=self.score.success, failure=self.score.failure,
+                    presses=self.score.successful_notes, notes_attempted=self.score.count,
                     target_midi=self.cfg.target_midi, physics_step=self.step_count,
                     terminal_reason=('success' if self.score.success else self.score.failure
                         or ('timeout' if self.step_count*self.cfg.physics_dt >= self.cfg.episode_seconds else '')))
@@ -284,11 +285,11 @@ class Task(gym.Env):
                 self.piano_annotations.update(self.step_count,self.cfg.physics_dt,self.score.count,forces)
             self.score.advance(angles, forces, self.cfg.physics_dt, self.step_count)
             self.audio_contacts.advance(self.step_count, self._audio_forces(angles, forces))
-            if self.score.success or self.score.failure:
+            if self.score.finished or self.score.failure:
                 break
         self._before_render()
         self.sim.render()
-        terminated = self.score.success or bool(self.score.failure)
+        terminated = self.score.finished or bool(self.score.failure)
         truncated = self.step_count*self.cfg.physics_dt >= self.cfg.episode_seconds and not terminated
         self._done = terminated or truncated
         return self._observation(), float(self.score.count-before), terminated, truncated, self._info()
