@@ -72,6 +72,7 @@ textures.zip
 **/*.png
 
 # Local development, generated datasets, and experiment artifacts
+/.cache/blind_pick_balls/
 /.codex_*/
 /_diagnostics/
 /data_*/

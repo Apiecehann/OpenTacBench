@@ -1305,12 +1305,18 @@ class BaseTask(UipcRLEnv):
                             if gripper_require_both_contacts is not None
                             else action_require_both_contacts
                         )
+                        # LOCAL cap-x 2026-10-19: cap-x's /gripper endpoint
+                        # sets grasp_servo=True whenever the close carries an
+                        # explicit force_threshold.  It selects the precise
+                        # landing branch below; upstream flows never set it.
+                        grasp_servo = bool(action.args.get('grasp_servo', False))
                         control_seq['gripper'] = {
                             'status': 'success',
                             'num_steps': -1,
                             'target': target_pos,
                             'threshold': depth_threshold,
                             'require_both_contacts': require_both_contacts,
+                            'servo': grasp_servo,
                         }
                     else:
                         control_seq['gripper'] = self._robot_manager.plan_gripper(
@@ -1602,6 +1608,7 @@ class BaseTask(UipcRLEnv):
                 gripper_seq['target'],
                 gripper_seq['threshold'],
                 gripper_seq.get('require_both_contacts'),
+                gripper_seq.get('servo', False),
             )
             while True:
                 if idx >= arm_steps and not gripper_active:
@@ -1816,7 +1823,9 @@ class BaseTask(UipcRLEnv):
 
         return exec_success, self.eval_success
 
-    def adaptive_set_gripper(self, qpos, depth_threshold:float=None, require_both_contacts: bool | None = None):
+    def adaptive_set_gripper(self, qpos, depth_threshold:float=None,
+                             require_both_contacts: bool | None = None,
+                             servo: bool = False):
         if self.cfg.tactile_sensor_type in ("xensews", "xensews_robotiq"):
             yield from self._adaptive_set_xense_gripper(qpos, depth_threshold, require_both_contacts)
             return
@@ -1824,6 +1833,9 @@ class BaseTask(UipcRLEnv):
         max_steps = 1000
 
         default_step, contact_step = 0.0005, 0.00005
+        # LOCAL cap-x 2026-10-19: fast travel outside the contact zone, used
+        # only by the precise-landing branch below.
+        fast_step = 0.005
 
         last_qpos = self._robot_manager.get_gripper_qpos()
         max_depth = (
@@ -1837,13 +1849,89 @@ class BaseTask(UipcRLEnv):
         step_sign = 1.0 if qpos > self._robot_manager.get_gripper_qpos() else -1.0
         step_size = step_sign * (contact_step if direct == 'open' else default_step)
 
+        # LOCAL cap-x 2026-10-19 (precise/servo landing, ported from
+        # UniVTAC/envs/_base_task.py): the historical close walks the fingers
+        # toward the threshold and stops the moment every pad reads below it.
+        # That works while the object yields, but once a rigid object is
+        # pinched between the pads a micro-step re-anchored to the measured
+        # qpos cannot advance the fingers: the close stalls at its own
+        # equilibrium, short of the commanded depth.  With ``servo`` the close
+        # becomes a landing: fast travel to first touch, then the position-
+        # rung search below, landing every pad inside
+        # [threshold-0.15, threshold+0.15] mm.  It gives up on an asymmetric
+        # or wedged grasp instead of grinding to the step budget.  Default
+        # off: upstream flows never set grasp_servo and keep their exact
+        # historical landing behaviour.
+        precise = bool(servo) and direct == 'close' and depth_threshold is not None
+        if precise:
+            _t_mm = float(depth_threshold.min().item())
+            _lo, _hi = _t_mm - 0.15, _t_mm + 0.15
+            _contacted = False
+            # LOCAL cap-x 2026-10-19 (second pass): search the landing in
+            # position rungs instead of micro-stepping from the measured qpos.
+            # A re-anchored 0.05-0.2 mm step caps the drive error at that step,
+            # and on a rigid object the force is too small to move a finger
+            # already stopped on it: the first seed-4 run with the ported
+            # branch stalled at the exact legacy equilibrium (27.80/27.97)
+            # through all 150 fine steps.  The expert's recipe moves the
+            # fingers in 0.05-percent rungs (1.95 mm per finger) and reads the
+            # gel after each rung settles; this does the same, holding every
+            # rung for _hold steps so the reading is the settled one, and
+            # halving the rung whenever the depth crosses the target so the
+            # final rungs bracket the band.
+            _cmd_qpos = last_qpos
+            _rung = 0.00195  # one 0.05-percent rung, m per finger
+            _min_rung = 0.0001
+            _hold = 0
+            _err_sign = 0
+            _moves = 0
+            _flips = 0
+            _converged = False
+
         stop_reason = 'max_steps'
         for i in range(max_steps):
             current_qpos = self._robot_manager.get_gripper_qpos()
             tactile_depth = self._tactile_manager.get_min_depth()
 
             if direct == 'close':
-                if torch.allclose(max_depth, tactile_depth, atol=1e-5):
+                if precise:
+                    if not _contacted:
+                        if torch.any(tactile_depth < max_depth - 0.3):
+                            _contacted = True
+                            _cmd_qpos = current_qpos
+                        else:
+                            step_size = -fast_step
+                            # Fast travel stays re-anchored: a 5 mm lead is
+                            # large enough to move the fingers freely.
+                            _cmd_qpos = max(current_qpos + step_size, qpos)
+                    if _contacted:
+                        if _hold > 0:
+                            # Hold the last rung so the read below is settled.
+                            _hold -= 1
+                            step_size = 0.0
+                        else:
+                            _tmin = float(tactile_depth.min().item())
+                            _tmax = float(tactile_depth.max().item())
+                            if _tmin >= _lo and _tmax <= _hi:
+                                stop_reason = 'servo'
+                                _converged = True
+                                break
+                            # Too shallow -> close (command down); too deep ->
+                            # open (command up).  A sign change means the band
+                            # was crossed between two rungs: halve the rung.
+                            sign = -1 if _tmax > _hi else 1
+                            if _err_sign and sign != _err_sign:
+                                _rung = max(_rung * 0.5, _min_rung)
+                                _flips += 1
+                            _err_sign = sign
+                            _moves += 1
+                            if _moves > 24 or _flips >= 6:
+                                stop_reason = 'servo'
+                                break
+                            step_size = sign * _rung
+                            _cmd_qpos = max(_cmd_qpos + step_size, qpos)
+                            _hold = 8
+                elif torch.allclose(max_depth, tactile_depth, atol=1e-5):
                     step_size = step_sign * default_step
                 elif depth_threshold is not None:
                     if torch.all(tactile_depth < depth_threshold):
@@ -1874,6 +1962,8 @@ class BaseTask(UipcRLEnv):
             if np.allclose(current_qpos, qpos, atol=1e-5):
                 stop_reason = 'target'
                 break
+            elif precise:
+                target_qpos = _cmd_qpos
             elif np.abs(current_qpos - qpos) < np.abs(step_size):
                 target_qpos = qpos
             else:
@@ -1885,7 +1975,13 @@ class BaseTask(UipcRLEnv):
             yield position, velocity, True
 
         final_qpos = self._robot_manager.get_gripper_qpos()
-        final_target_qpos = qpos if stop_reason == 'max_steps' else final_qpos
+        if precise and _converged:
+            # Keep the lead that produced the landing.  Holding the measured
+            # qpos would let the gel push the fingers back to the old
+            # equilibrium as soon as the next action moves the arm.
+            final_target_qpos = _cmd_qpos
+        else:
+            final_target_qpos = qpos if stop_reason == 'max_steps' else final_qpos
         cmd_dim = len(self._robot_manager._gripper_ids)
         final_position = torch.full((cmd_dim,), final_target_qpos, device=self._robot_manager.device)
         yield final_position, torch.zeros_like(final_position), False

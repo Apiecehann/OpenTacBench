@@ -34,7 +34,16 @@ task_parameters:
   motion_speed_scale: 3.0
   thread_speed_scale: 2.0
   initial_depth_m: 0.014
-  seat_top_m: 0.022
+  # LOCAL DEVIATION (2026-10-10): the seat was raised 0.022 -> 0.0285, so the
+  # free travel (.055-.006-initial_depth-seat_top) is 6.5 mm instead of 13.
+  # The turns an insertion needs are travel / lead, so this halves the turning
+  # and the release/re-grasp cycles with it -- and the re-grasp cycle, not the
+  # turning, is where the episode's time goes.  initial_depth_m is deliberately
+  # unchanged: the bulb starts where it always did and only the seat moved, so
+  # the reset pose, the grasp, the probe geometry and the sampled leads are the
+  # same as on the runs the tactile skills were read off.  check_success's turn
+  # window moved with the travel -- see the note above it.
+  seat_top_m: 0.0285
   grip_depth_mm: 27.2
   thread_friction: 0.15
   target_torque_Nm: 0.12

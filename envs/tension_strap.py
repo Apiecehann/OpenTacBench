@@ -461,6 +461,14 @@ def strap_mesh():
 
 # Tension strap
 
+# Height of the tab's centre above the strap's own origin, in the strap's
+# local frame.  The tab is the block at the top of the strap and the only part
+# the pads close on, so this is the grasp point; it is named here because the
+# expert and any grasp helper that has to build the pose from the actor's own
+# origin both need the same number (cap-x reads it through _GT_GRASP_RULES).
+TAB_LOCAL_Z = .174
+
+
 class Task(BaseTask):
     def __init__(self, cfg, **kwargs):
         self.params = task_parameters(cfg)
@@ -853,7 +861,7 @@ class Task(BaseTask):
         return False
 
     def _perform_strap_episode(self):
-        center = self.base + [0.,0.,.174]
+        center = self.base + [0.,0.,TAB_LOCAL_Z]
         q = self._robot_manager.get_gripper_center_pose().q
         for dz,tag in [(.05,'above_strap'),(0.,'approach_strap')]:
             target = Pose(center+[0.,0.,dz],q)

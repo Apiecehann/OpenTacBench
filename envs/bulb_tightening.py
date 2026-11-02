@@ -2308,6 +2308,17 @@ class Task(LegacyBulbTask):
     # are signed progress, so a loosening run is negative), it went the whole
     # thread's travel less 2 mm, rotation and descent agree to 2 mm, it is not
     # tilted or off-centre, it is pressed onto its seat, and nothing failed.
+    #
+    # 2026-10-10: the seat was raised (.022 -> .0285 in the task config) so the
+    # free travel is 6.5 mm instead of 13, and the turn window came down with
+    # it.  The turns are travel / lead and nothing else, so the travel sets
+    # them: over the sampled leads (4.271--7.935 mm) the insertion is 0.82 to
+    # 1.52 turns.  The old [1, 3] would have rejected every deep-thread seed on
+    # its lower bound -- and its 3.0 ceiling was already inside the old
+    # travel's own range.  The window keeps the job it had, signed progress the
+    # tightening way rather than a spin in place: 0.5 clears the lowest
+    # physical turn count by 39 per cent, 2.0 the highest by 31, and the
+    # advance term below still asks for the whole travel.
     def check_success(self):
         if self._accepted_result is not None:
             return self._accepted_result
@@ -2315,7 +2326,7 @@ class Task(LegacyBulbTask):
         if self.controller in ('diagnostic_torque_probe','diagnostic_load_grid','diagnostic_grip_probe','diagnostic_crush'):
             return False
         return (self.failure is None and self.plan_success
-                and 1.<=m.get('formal_net_turns',0)<=3.
+                and .5<=m.get('formal_net_turns',0)<=2.
                 and m.get('formal_advance_m',0)>=self.thread_spec.nominal_free_travel_m-.002
                 and m.get('phase_error_m',1)<.002 and m.get('center_drift_m',1)<.002
                 and m.get('tilt_deg',90)<6 and m.get('seat_force_N',0)>3.)
@@ -2342,8 +2353,8 @@ class Task(LegacyBulbTask):
                 ('controller',self.controller not in ('diagnostic_torque_probe','diagnostic_load_grid',
                                                       'diagnostic_grip_probe','diagnostic_crush'),
                  f'diagnostic controller {self.controller} is never accepted'),
-                ('net_turns',1.<=net_turns<=3.,
-                 f'formal_net_turns {net_turns:.3f} outside 1--3 (signed: negative is the loosening way)'),
+                ('net_turns',.5<=net_turns<=2.,
+                 f'formal_net_turns {net_turns:.3f} outside 0.5--2 (signed: negative is the loosening way)'),
                 ('advance',advance>=travel-.002,
                  f'formal_advance_m {advance*1000.:.2f} mm < {(travel-.002)*1000.:.2f} mm required'),
                 ('phase_error',phase_error<.002,

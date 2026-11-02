@@ -37,23 +37,26 @@ BASE_ENV_STEP = method("envs/_base_task.py", "BaseTask", "env_step")
 
 # LOCAL DEVIATION from upstream (2026-10-09): the bulb bar is the seat, not
 # the torque, so this file's own test follows `Task.check_success` as it
-# stands here -- turns in [1,3], the whole travel less 2 mm, pressed on the
-# seat, nothing tilted, drifting or failed.  Upstream's version of this test
+# stands here -- turns in [0.5,2], the whole travel less 2 mm, pressed on the
+# seat, nothing tilted, drifting or failed.  The turn window came down from
+# [1,3] on 2026-10-10 with the free travel (13 -> 6.5 mm), and the fixture's
+# travel here is the halved one, so the advance cases keep mirroring it.
+# Upstream's version of this test
 # asserted the 1.5-turn floor and the torque hold that left with the criteria.
 def _bulb_task(**overrides):
     state = dict(_accepted_result=None, controller='diagnostic_force', failure=None,
-        plan_success=True, thread_spec=NS(handedness=1, nominal_free_travel_m=.013),
-        measured=dict(formal_net_turns=2.8, formal_advance_m=.012,
+        plan_success=True, thread_spec=NS(handedness=1, nominal_free_travel_m=.0065),
+        measured=dict(formal_net_turns=1.2, formal_advance_m=.006,
             phase_error_m=.0001, center_drift_m=0., tilt_deg=0., seat_force_N=4.))
     state.update(overrides)
     return NS(**state)
 
 
 @pytest.mark.parametrize('field,value,accepted',[
-    ('formal_net_turns',.99,False),  ('formal_net_turns',1.,True),
-    ('formal_net_turns',1.49,True),  ('formal_net_turns',3.,True),
-    ('formal_net_turns',3.01,False), ('formal_net_turns',-1.2,False),
-    ('formal_advance_m',.010,False), ('formal_advance_m',.012,True),
+    ('formal_net_turns',.49,False),  ('formal_net_turns',.5,True),
+    ('formal_net_turns',1.2,True),   ('formal_net_turns',2.,True),
+    ('formal_net_turns',2.01,False), ('formal_net_turns',-1.2,False),
+    ('formal_advance_m',.004,False), ('formal_advance_m',.006,True),
     ('seat_force_N',3.,False),       ('seat_force_N',3.5,True),
     ('tilt_deg',6.,False),           ('center_drift_m',.002,False),
     ('phase_error_m',.002,False)])
@@ -205,7 +208,9 @@ def test_profile_paths_and_seed_do_not_depend_on_cwd_or_environment(name, tmp_pa
             assert not Path(config["task_parameters"][key]).is_absolute()
     if name == "wipe_vase":
         assert params["required_clean_fraction"] == .925
-        assert params["pressure_band_N"] == [7.2, 8.8]
+        # LOCAL (2026-10-14): widened from upstream [7.2, 8.8]; see the comment on
+        # pressure_band_N in task_config/wipe_vase.yml for the measurement.
+        assert params["pressure_band_N"] == [5.0, 10.0]
 
 
 class Client:

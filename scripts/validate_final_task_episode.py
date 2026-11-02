@@ -105,11 +105,14 @@ def validate_final(episode,reference=None,expect=None):
             if accepted:
                 # The bar is the seat (2026-10-09): the bulb all the way in and
                 # loaded, nothing to bring up to a torque and nothing to submit.
-                # Mirrors Task.check_success term for term.
-                if not (1<=physical.get("formal_net_turns",0)<=3
+                # Mirrors Task.check_success term for term, the turn window
+                # included -- that window came down to 0.5--2 on 2026-10-10 with
+                # the free travel (13 -> 6.5 mm), see the note in
+                # envs/bulb_tightening.py.
+                if not (.5<=physical.get("formal_net_turns",0)<=2
                         and physical.get("formal_advance_m",physical.get("advance_m",0))>=
                             (.055-.006-meta.get("thread_physical_spec",{}).get("initial_depth_m",.014)
-                             -meta.get("thread_physical_spec",{}).get("seat_top_m",.022)-.002)
+                             -meta.get("thread_physical_spec",{}).get("seat_top_m",.0285)-.002)
                         and physical.get("phase_error_m",1)<.002
                         and physical.get("center_drift_m",1)<.002 and physical.get("tilt_deg",99)<6
                         and physical.get("seat_force_N",0)>3):
