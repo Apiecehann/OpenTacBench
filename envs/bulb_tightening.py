@@ -934,7 +934,6 @@ SUCCESS_TILT_TOLERANCE_DEG = 6.0
 
 @configclass
 class TaskCfg(BaseTaskCfg):
-    policy_controls_termination = True
     cameras = [
         CameraCfg(
             name="head",
@@ -1760,8 +1759,6 @@ class Task(LegacyBulbTask):
         # seat the bulb.  Damage still ends the episode here, and that verdict
         # is a failure -- which is the right answer for a bulb that was
         # dropped or cracked before it was scored.
-        # Kept alongside upstream's explicit finish_episode() (2026-11-02):
-        # the eval server scores through check_success and never calls END.
         if self._accepted_result is not None:
             return bool(self._accepted_result),bool(self._accepted_result)
         executed,_=super().take_action(action,*args,**kwargs)
@@ -1772,17 +1769,6 @@ class Task(LegacyBulbTask):
             return bool(executed and not self.failure),bool(self._accepted_result)
         return executed,False
 
-    def finish_episode(self):
-        """Score only the explicit policy END, never a stationary command."""
-        if self.phase_id == self.PHASE_TERMINAL:
-            return bool(self.eval_success)
-        if self.phase_id != self.PHASE_POLICY:
-            raise RuntimeError('finish_episode() requires the POLICY handoff')
-        self.metadata['bulb_submission_source']='policy_submitted_end'
-        self._finish_bulb_episode()
-        self._save_metadata()
-        return self.eval_success
-
     def check_early_stop(self):
         return self.failure is not None or self._accepted_result is False
 
@@ -1790,9 +1776,9 @@ class Task(LegacyBulbTask):
         from ._force_task_utils import motion_ticks
         if self._accepted_result is not None:
             return
+        self._submission_requested=True
         self.metadata.setdefault('bulb_submission_source','expert_submitted_end')
         self._accepted_result=bool(self.check_success())
-        self.eval_success=self._accepted_result
         if not self._accepted_result and self.failure is None:
             self.failure='submission_outside_acceptance'
         self.metadata['bulb_accepted']=self._accepted_result
@@ -1805,7 +1791,7 @@ class Task(LegacyBulbTask):
         self._monitor_bulb=False
         if self._accepted_result:
             light_after_submission(self)
-        if self.cfg.save_frequency>0 and self.mode=='collect':
+        if self.cfg.save_frequency>0 and self.mode!='eval_test':
             from ._force_task_utils import record_terminal_observation
             record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
         manager=self._robot_manager
@@ -1814,7 +1800,7 @@ class Task(LegacyBulbTask):
         qpos=float(manager.get_gripper_qpos())
         manager.set_gripper(qpos,force=True)
         review_start=self.step_count
-        if self.plan_success and self.mode == 'collect':
+        if self.plan_success:
             self.phase='terminal_review'
             if self._accepted_result:
                 # Reveal the powered bulb only after the submitted result is
@@ -2124,10 +2110,9 @@ class Task(LegacyBulbTask):
                     stable=stable+4 if seated and omega==0. else 0
                     if stable>=int(self.params.get('policy_hold_steps',132)):
                         self.metadata['bulb_policy_hold_steps']=stable
-                        # The expert decides END from its own controller.
-                        # The action interface does not infer END from a hold.
-                        self.finish_episode()
-                        return True
+                        # The hold is the expert's own business; the episode is
+                        # submitted by _play_once when this returns (there is no
+                        # stationary END gesture to catch since 2026-10-09).
                 correction+=omega*self.cfg.sim.dt*2
                 q=t3d.quaternions.qmult(
                     t3d.quaternions.axangle2quat([0.,0.,1.],self.controller_spin_sign*correction),hold_start.q)
@@ -2210,16 +2195,30 @@ class Task(LegacyBulbTask):
         finally:
             self._expert_active=False
         if self.controller not in ('diagnostic_grip_probe','diagnostic_torque_probe','diagnostic_load_grid'):
-            self.finish_episode()
+            self._finish_bulb_episode()
 
     def _submit_review_end(self):
-        """Submit a deliberately partial action using the ordinary public END."""
+        """Score a deliberately partial action at a still command.
+
+        The review scenarios want a verdict taken while the bulb is knowingly
+        incomplete.  Upstream got one by holding the public joint target still
+        until the END gesture fired; that gesture is gone (2026-10-09), so the
+        still command is walked out and the verdict is asked for directly --
+        which scores the same physical state the gesture used to.
+        """
+        from ._force_task_utils import execute_joint_target
+        manager=self._robot_manager
+        joints=manager.robot.data.joint_pos[:,manager._arm_ids][0].clone()
         start=self.step_count
         self.phase='review_partial_submission'
         self.metadata['review_partial_submission']=dict(
             scenario=self.params.get('bulb_review_scenario'),
-            start_step=start,action='explicit finish_episode()')
-        self.finish_episode()
+            start_step=start,action='stationary public joint target; verdict asked for directly')
+        for _ in range(100):
+            executed,accepted=execute_joint_target(self,arm=joints,ticks=2)
+            if self._accepted_result is not None or not executed or accepted:
+                break
+        self._finish_bulb_episode()
         self.metadata['review_partial_submission']['verdict_step']=self.metadata.get('bulb_physical_verdict_step')
         self.metadata['review_partial_submission']['return_after_terminal_review_step']=self.step_count
 
