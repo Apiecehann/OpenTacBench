@@ -28,7 +28,9 @@ class RobotManager:
         self.task = task
         self.device = task.device
         self.sensor_type = task.cfg.tactile_sensor_type
-        if self.sensor_type == 'xensews':
+        if getattr(self.cfg,'robot_type',None) is not None:
+            self.robot_type = self.cfg.robot_type
+        elif self.sensor_type == 'xensews':
             self.robot_type = 'franka_robotiq'
         elif self.sensor_type in ['gsmini', 'neote']:
             self.robot_type = 'franka_panda'
@@ -44,12 +46,15 @@ class RobotManager:
         self.last_gripper_velocity = None
         self._ik_controller = None
 
-        if self.robot_type == 'franka_panda':
+        if self.robot_type in ('franka_panda', 'aloha_vx300s'):
             self.hand_name = 'panda_hand'
             self._arm_joint_names = [
                 'panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4',
                 'panda_joint5', 'panda_joint6', 'panda_joint7'
             ]
+            if self.robot_type == 'aloha_vx300s':
+                from .aloha_assets import ARM_JOINTS
+                self._arm_joint_names = list(ARM_JOINTS)
             self._gripper_joint_names = [
                 'panda_finger_joint1', 'panda_finger_joint2'
             ]
@@ -86,6 +91,9 @@ class RobotManager:
         else:
             raise NotImplementedError(f"Robot type {self.robot_type} not implemented.")
  
+        if getattr(self.cfg,'planner_yaml',None) is not None:
+            self.yaml_path = self.cfg.planner_yaml
+
         # offset from end-effector to gripper center frame
         self._offset = Pose(p=[0, 0, -offset], q=[1, 0, 0, 0])
         self._offset_pos = torch.tensor([0.0, 0.0, offset], device=self.device).repeat(self.task.num_envs, 1)

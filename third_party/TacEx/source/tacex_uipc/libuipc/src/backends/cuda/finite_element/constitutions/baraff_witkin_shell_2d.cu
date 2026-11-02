@@ -81,5 +81,8 @@ class BaraffWitkinShell2D final : public Codim2DConstitution
     }
 };
 
-REGISTER_SIM_SYSTEM(BaraffWitkinShell2D);
+// This unfinished shell has no public constitution and reuses UID 18 from
+// AffineBodyRevoluteJoint. Registering it makes FEM treat hinge edges as shell
+// elements, then index an empty 1D constitution table during world.init().
+// Enable it only after assigning a distinct UID and implementing its kernels.
 }  // namespace uipc::backend::cuda

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 import numpy as np
-from dataclasses import dataclass
 from uipc import view
 from ._base_task import *
 from ._force_task_utils import (
@@ -13,6 +12,7 @@ from ._force_task_utils import (
     image_features,
     read_rgb,
     sample_physics,
+    strap_color_palette,
     task_parameters,
     tetra_faces,
     write_tet_asset,
@@ -23,41 +23,48 @@ from ._force_task_utils import (
 
 def strap_ladder(task, pose):
     levels=list(task.params.get('probe_force_levels_N',[14.,18.,22.,18.]))
-    if not levels or any(not 2.<=float(v)<=28. for v in levels):
-        raise ValueError("Force diagnostic levels must be 2--28 N")
+    if not levels or any(not 0.<=float(v)<=28. for v in levels):
+        raise ValueError("Force diagnostic levels must be 0--28 N")
     task.active=True
     origin=pose.p.copy();position=origin.copy()
     task.metadata['diagnostic_protocol']={'type':'force ladder','levels_N':levels,
-        'hold_s':1.,'control':'privileged physical force; images recorded independently'}
+        'hold_s':1.,'observation_hz':1/(2*task.cfg.sim.dt),
+        'motion_speed_scale':task.motion_speed_scale,
+        'control':'privileged physical force; images recorded independently'}
     task.failure=None
     completed=[]
     for level_index, level in enumerate(levels):
-        stable=0
+        stable_since=None
         task.probe_level_index=level_index
         task.probe_target_N=float(level)
         task.phase=f'diagnostic {level:g} N'
         for tick in range(1200):
-            if tick%4==0:
-                row=task._record()
-                error=float(level)-row['tension_N']
-                slip=np.linalg.norm(np.asarray(row['tab_in_hand_m'])-task.initial_tab_in_hand)
-                if row['tension_N']>48 or row['maximum_stretch']>1.6:
-                    task.failure='probe_overload';break
-                if slip>.012:
-                    task.failure='probe_grasp_lost';break
-                if position[2]-origin[2]>.055:
-                    task.failure='probe_travel_limit';break
-                stable=stable+4 if abs(error)<.25 else 0
-                if stable>=120:
-                    completed.append({'level_N':level,'step':task.step_count,'force_N':row['tension_N']})
-                    break
-                velocity=float(np.clip(error/1400.,-.002,.002))
-                if abs(error)<.08:velocity=0.
-            position[2]+=velocity*task.cfg.sim.dt
+            # Match the public 60 Hz image cadence; temporal marker tracking
+            # cannot be calibrated against a different sampling interval.
+            row=task._record()
+            error=float(level)-row['tension_N']
+            slip=np.linalg.norm(np.asarray(row['tab_in_hand_m'])-task.initial_tab_in_hand)
+            if row['tension_N']>float(task.params.get('overload_N',24.)) or row['maximum_stretch']>1.6:
+                task.failure='probe_overload';break
+            if slip>.012:
+                task.failure='probe_grasp_lost';break
+            if position[2]-origin[2]>.055:
+                task.failure='probe_travel_limit';break
+            if abs(error)<.25:
+                if stable_since is None:stable_since=task.step_count
+            else:
+                stable_since=None
+            if stable_since is not None and (task.step_count-stable_since)*task.cfg.sim.dt>=1.:
+                completed.append({'level_N':level,'step':task.step_count,'force_N':row['tension_N']})
+                break
+            speed=1.+(task.motion_speed_scale-1.)*float(np.clip((abs(error)-1.)/2.,0.,1.))
+            velocity=float(np.clip(error/1400.,-.002,.002))*speed
+            if abs(error)<.08:velocity=0.
+            position[2]+=velocity*2*task.cfg.sim.dt
             position[2]=min(position[2],task._robot_manager.get_ee_pose().p[2]+.001)
             task._servo(position,pose.q)
             if not task.plan_success:break
-        if stable<120 or task.failure or not task.plan_success:
+        if len(completed)!=level_index+1 or task.failure or not task.plan_success:
             task.failure=task.failure or 'probe_level_timeout';break
     task.active=False
     task._record()
@@ -68,79 +75,7 @@ def strap_ladder(task, pose):
     task.metadata['strap_final']=task.measured
 
 
-# Strap lifecycle
-
-@dataclass(frozen=True)
-class StrapAcceptanceLimits:
-    targets_N: tuple = (12.0, 18.0)
-    tolerance_N: float = 0.5
-    hold_seconds: float = 3.0
-    timeout_seconds: float = 60.0
-    physics_dt: float = 1.0 / 120.0
-
-class StrapLifecycle:
-    def __init__(self, start_step, limits=None):
-        self.limits = limits or StrapAcceptanceLimits()
-        self.start_step = int(start_step)
-        self.last_step = self.start_step
-        self.stage_index = 0
-        self.stable_since = None
-        self.completed_steps = []
-        self.failure = ''
-        self.success = False
-
-    def advance(self, step, tension_N, *, grasped, damage=''):
-        step = int(step)
-        if step < self.last_step:
-            raise ValueError('Physical time moved backwards')
-        if step == self.last_step:
-            return
-        consecutive = step == self.last_step + 1
-        self.last_step = step
-        if self.failure:
-            return
-        if damage:
-            self.failure = str(damage)
-            self.success = False
-            return
-        if not math.isfinite(float(tension_N)):
-            self.failure = 'invalid_tension'
-            return
-        if self.success:
-            return
-        if not consecutive:
-            self.stable_since = None
-        target = self.limits.targets_N[self.stage_index]
-        if grasped and abs(float(tension_N) - target) <= self.limits.tolerance_N:
-            if self.stable_since is None:
-                self.stable_since = step
-            if (step - self.stable_since) * self.limits.physics_dt >= self.limits.hold_seconds - 1e-12:
-                self.completed_steps.append(step)
-                self.stage_index += 1
-                self.stable_since = None
-                self.success = self.stage_index == len(self.limits.targets_N)
-        else:
-            self.stable_since = None
-        if not self.success and (step-self.start_step)*self.limits.physics_dt >= self.limits.timeout_seconds-1e-12:
-            self.failure = 'timeout'
-
-    def snapshot(self):
-        return {
-            'contract': 'strap_two_stage_v1',
-            'target_sequence_N': list(self.limits.targets_N),
-            'tolerance_N': self.limits.tolerance_N,
-            'hold_seconds_per_stage': self.limits.hold_seconds,
-            'timeout_seconds': self.limits.timeout_seconds,
-            'physics_dt_s': self.limits.physics_dt,
-            'stage_index': self.stage_index,
-            'completed_steps': self.completed_steps.copy(),
-            'current_continuous_hold_seconds': (
-                0.0 if self.stable_since is None else
-                (self.last_step-self.stable_since)*self.limits.physics_dt),
-            'policy_elapsed_seconds': (self.last_step-self.start_step)*self.limits.physics_dt,
-            'success': self.success,
-            'failure': self.failure,
-        }
+from envs._strap_sequence import StrapAcceptanceLimits, StrapLifecycle
 
 
 # Tension strap
@@ -339,7 +274,7 @@ def rupture(task):
                     attr.Set(usdrt.Vt.IntArray(values))
             rest_surface = extract_surface(template)
             task.presentation.color_strap(mesh,
-                np.asarray(rest_surface.positions().view()).reshape(-1,3))
+                np.asarray(rest_surface.positions().view()).reshape(-1,3)-task.base)
             # Keep the actual broken FEM surface and its changing normals in
             # USD, as with the verified vase pad renderer. The old Fabric mesh
             # otherwise retains stale/empty normals after a topology change.
@@ -359,31 +294,15 @@ def rupture(task):
             live.SetNormalsInterpolation('vertex')
             material=UsdShade.Material(stage.GetPrimAtPath(root+'/Looks/Elastomer'))
             UsdShade.MaterialBindingAPI.Apply(live.GetPrim()).Bind(material)
-            # Explicit per-face material bindings survive runtime topology
-            # replacement in RTX; a dynamic displayColor reader previously
-            # rendered most of the new surface black after the handoff.
             local_rest=task.mesh_points[indices]
-            centers=local_rest[faces].mean(axis=1)
-            band=(centers[:,2]>.01601)&(centers[:,2]<.13199)
-            which=np.full(len(faces),3,dtype=int)
-            band_centers=np.asarray(task.params.get('band_centers_m',[-.025,0.,.025]))
-            which[band]=np.abs(centers[band,0,None]-band_centers[None,:]).argmin(axis=1)
-            palette=np.asarray([[50,126,207],[253,230,64],[253,77,54],[55,58,62]],float)/255.
-            palette=np.where(palette<=.04045,palette/12.92,((palette+.055)/1.055)**2.4)
-            from ._force_task_utils import _material
-            binding=UsdShade.MaterialBindingAPI.Apply(live.GetPrim())
-            color_counts=[]
-            for color_index,color in enumerate(palette):
-                face_ids=np.flatnonzero(which==color_index).astype(np.int32)
-                color_counts.append(int(len(face_ids)))
-                if not len(face_ids):
-                    raise RuntimeError('Broken strap lost a required color region')
-                mat=_material(stage,root+f'/Looks/BrokenStrap{color_index}',tuple(color),.78)
-                subset=binding.CreateMaterialBindSubset(f'color_{color_index}',Vt.IntArray.FromNumpy(face_ids))
-                UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(mat)
+            which=task.presentation.color_strap(live, local_rest)
+            color_counts=np.bincount(which, minlength=4).tolist()
+            if not all(color_counts):
+                raise RuntimeError('Broken strap lost a required color region')
             task.metadata['strap_broken_surface_colors']={
                 'method':'constant-color material subsets by rest-mesh face location',
-                'faces_per_color_blue_yellow_red_tab':color_counts,
+                'mode':task.params['strap_color_mode'],
+                'faces_per_region_left_middle_right_tab':color_counts,
                 'rest_local_bounds_m':[local_rest.min(0).tolist(),local_rest.max(0).tolist()]}
             np.savez_compressed(task.work/'broken_surface_mapping.npz',
                 live_points=xyz.copy(),faces=faces.copy(),volume_indices=indices.copy(),
@@ -472,6 +391,8 @@ TAB_LOCAL_Z = .174
 class Task(BaseTask):
     def __init__(self, cfg, **kwargs):
         self.params = task_parameters(cfg)
+        self.params.setdefault('strap_color_mode', 'blue')
+        strap_color_palette(self.params)  # Validate before starting the scene.
         from ._force_task_utils import motion_speed_scale
         self.motion_speed_scale = motion_speed_scale(self.params)
         self.params.setdefault('public_tactile_grasp',True)
@@ -486,7 +407,6 @@ class Task(BaseTask):
         self.ruptured = False
         self._monitor_strap=False;self._expert_active=False;self._grip_released=False
         self._accepted_result=None
-        self._submission_requested=False;self._submission_anchor=None;self._submission_hold_steps=0
         self.active = False
         self.trace = []
         self.measured = {}
@@ -495,9 +415,11 @@ class Task(BaseTask):
         self.held_steps = 0
         self.failure = None
         self.modulus = float(self.params.get('modulus_mpa', .25))
-        self.target = 12.0
-        self.tolerance = 0.5
-        self.target_sequence = (12.0, 18.0)
+        self.acceptance_limits = StrapAcceptanceLimits.from_parameters(self.params, cfg.sim.dt)
+        self.params['force_time_sequence'] = self.acceptance_limits.as_sequence()
+        self.target_sequence = self.acceptance_limits.targets_N
+        self.target = self.target_sequence[0]
+        self.tolerance = self.acceptance_limits.tolerance_N
         self._stage_scorer = None
         self._measure_step = -1
         self.controller = self.params.get('controller', 'diagnostic_force')
@@ -522,7 +444,7 @@ class Task(BaseTask):
         if 'contact_d_hat_m' in self.params:
             cfg.uipc_sim.contact.d_hat=float(self.params['contact_d_hat_m'])
         from ._force_task_utils import configure_final_task
-        configure_final_task(cfg, self.params, max_policy_seconds=60)
+        configure_final_task(cfg, self.params, max_policy_seconds=self.acceptance_limits.timeout_seconds)
         super().__init__(cfg, **kwargs)
         self.video_handler.fps = 120 / cfg.video_frequency
         self.video_handler.encoder_threads = 2
@@ -591,8 +513,7 @@ class Task(BaseTask):
         self._monitor_strap=False
         result=super().reset(*args,**kwargs)
         self._grip_released=False;self._accepted_result=None
-        self._submission_requested=False;self._submission_anchor=None;self._submission_hold_steps=0
-        self._stage_scorer=StrapLifecycle(self.policy_start_step)
+        self._stage_scorer=StrapLifecycle(self.policy_start_step, self.acceptance_limits)
         self._measure_step=-1
         self._monitor_strap=True
         self.metadata['strap_acceptance']=self._stage_scorer.snapshot()
@@ -636,7 +557,6 @@ class Task(BaseTask):
             damage=self.failure or '')
         if self._stage_scorer.failure and self.failure is None:
             self.failure=self._stage_scorer.failure
-        self._submission_requested=self._stage_scorer.success
         self.metadata['strap_acceptance']=self._stage_scorer.snapshot()
         self.held_steps=int(round(self.metadata['strap_acceptance']['current_continuous_hold_seconds']/self.cfg.sim.dt))
         if self.failure and self._expert_active:
@@ -645,18 +565,20 @@ class Task(BaseTask):
     def check_early_stop(self):
         return self.failure is not None
 
-    def take_action(self,*args,**kwargs):
-        if self._accepted_result is not None:
-            return bool(self._accepted_result),bool(self._accepted_result)
-        executed,success=super().take_action(*args,**kwargs)
-        if success or self.failure:
-            self._finish_strap_episode()
-            return bool(executed and not self.failure),bool(self._accepted_result)
-        return executed,success
+    def finish_episode(self):
+        """Accept an explicit policy END; ordinary joint actions never submit."""
+        if self.phase_id == self.PHASE_TERMINAL:
+            return bool(self.eval_success)
+        if self.phase_id != self.PHASE_POLICY:
+            raise RuntimeError('finish_episode() requires the POLICY handoff')
+        self._finish_strap_episode()
+        self._save_metadata()
+        return self.eval_success
 
     def _finish_strap_episode(self):
         if self._accepted_result is not None:return
         self._accepted_result=bool(self.check_success())
+        self.eval_success=self._accepted_result
         if not self._accepted_result and self.failure is None:
             self.failure='incomplete_two_stage_sequence'
         self._monitor_strap=False;self.active=False
@@ -676,9 +598,10 @@ class Task(BaseTask):
         self.metadata['strap_trace_path']=str(self.work/'trace.jsonl')
         self.metadata['diagnostic_only']=self.controller!='marker_rgb' or bool(self.params.get('overload_demo')) or bool(self.params.get('strap_review_scenario'))
         self.metadata['success_scoring']='independent physical 12 N then 18 N, each within 0.5 N continuously 3 s; total 60 s'
-        from ._force_task_utils import record_terminal_observation
-        record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
-        if self.ruptured and self.plan_success:
+        if self.cfg.save_frequency > 0 and self.mode == 'collect':
+            from ._force_task_utils import record_terminal_observation
+            record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
+        if self.ruptured and self.plan_success and self.mode == 'collect':
             self.phase='rupture'
             for tick in range(180):
                 self._step(is_save=True)
@@ -696,7 +619,7 @@ class Task(BaseTask):
         self.reference = None
         self.failure = None
         self.held_steps = 0
-        self.target = 12.0
+        self.target = self.target_sequence[0]
         self._measure_step = -1
         self.phase = 'setup'
         self.policy_hold = 0
@@ -708,13 +631,15 @@ class Task(BaseTask):
         self.metadata['backend_energy_volume_scale']=6.0
         self.metadata['material_randomization'] = 'same mesh; hidden band modulus per process'
         self.metadata['force_units'] = 'SI gradient of installed StableNeoHookean elastic energy'
-        self.metadata['success_tension_bands_N'] = [[11.5,12.5],[17.5,18.5]]
+        self.metadata['success_tension_bands_N'] = [[max(0.,f-self.tolerance),
+            min(self.acceptance_limits.maximum_force_N,f+self.tolerance)] for f in self.target_sequence]
+        self.metadata['supported_force_range_N'] = [0.,self.acceptance_limits.maximum_force_N]
 
     def _release_reset_constraints(self):
         pass
 
     def build_instruction(self):
-        return 'Pull the elastic strap to12 newtons for3 seconds, then18 newtons for3 seconds; remain within0.5 newtons of each target.'
+        return self.acceptance_limits.instruction()
 
     def pre_move(self):
         self.move(self.atom.open_gripper(.85), tag='open_for_strap', delay=False)
@@ -754,6 +679,7 @@ class Task(BaseTask):
         m = self._measure()
         row = dict(step=self.step_count, phase=self.phase, **m)
         row['controller_target_N']=float(self.target)
+        row['controller_reference_N']=self.acceptance_limits.controller_reference(self.target)
         if self._stage_scorer is not None:
             row['physical_acceptance']=self._stage_scorer.snapshot()
         if hasattr(self,'probe_target_N'):
@@ -816,7 +742,7 @@ class Task(BaseTask):
         finally:
             self._expert_active=False
         if self.controller!='diagnostic_ladder':
-            self._finish_strap_episode()
+            self.finish_episode()
 
     def _close_strap_public(self):
         """Use the same two-tick qpos path recorded for public replay."""
@@ -920,8 +846,10 @@ class Task(BaseTask):
         if not np.isfinite(controller_deadband) or not 0. <= controller_deadband <= .10:
             raise ValueError('controller_deadband_N must be finite and between 0 and 0.10 N')
         self.metadata['controller_deadband_N']=controller_deadband
+        self.metadata['controller_force_references_N']=[
+            self.acceptance_limits.controller_reference(f) for f in self.target_sequence]
         scenario=self.params.get('strap_review_scenario','')
-        goals=(18.0,) if scenario=='only_second' else self.target_sequence
+        goals=(self.target_sequence[1],) if scenario=='only_second' else self.target_sequence
         self.target=float(goals[0])
         self.metadata['controller_goal_transitions']=[]
         while (not self.check_success() and self.failure is None
@@ -950,8 +878,9 @@ class Task(BaseTask):
                 self.phase='fixed displacement'
             else:
                 alpha=1.-np.exp(-control_dt/.15)
-                filtered=float(sensed) if filtered is None else filtered+alpha*(float(sensed)-filtered)
-                error=self.target-filtered
+                sensed=max(0.,float(sensed))
+                filtered=sensed if filtered is None else filtered+alpha*(sensed-filtered)
+                error=self.acceptance_limits.controller_reference(self.target)-filtered
                 # Follow the same vertical path faster far from the force target.
                 # Taper to the original controller within 1 N to retain its stable
                 # contact/hold behavior and the independent physical acceptance.
@@ -961,9 +890,11 @@ class Task(BaseTask):
                 image_hold_seconds=image_hold_seconds+control_dt if abs(error)<.20 else 0.0
                 self.phase=('hold' if abs(error)<.20 else ('pull' if velocity>0 else 'relax'))+f'_{self.target:g}N'
                 # Switch from image-estimated hold only; never read the scorer's stage.
-                dwell=1.0 if scenario=='short_hold' else 3.30
+                hold_index=1 if scenario=='only_second' else goal_index
+                required_hold=self.acceptance_limits.hold_seconds[hold_index]
+                dwell=min(1.,required_hold/2) if scenario=='short_hold' else required_hold+.30
                 if image_hold_seconds>=dwell and scenario=='only_second':
-                    self.metadata['review_controller_end']='submitted after holding18N without completing12N'
+                    self.metadata['review_controller_end']='submitted after the second requested image-estimated hold only'
                     break
                 if image_hold_seconds>=dwell and scenario=='only_first':
                     self.metadata['review_controller_end']='submitted after the first image-estimated hold only'
@@ -981,6 +912,9 @@ class Task(BaseTask):
                         executed,accepted=execute_joint_target(self,gripper=gripper,ticks=2)
                         if not executed or accepted or self.failure:break
                     self.metadata['review_controller_end']='released grip through public joint commands under tension'
+                    break
+                if image_hold_seconds>=dwell and goal_index==len(goals)-1:
+                    self.metadata['controller_submission']='both image-estimated holds completed; submit physical verdict'
                     break
                 if image_hold_seconds>=dwell and goal_index+1<len(goals) and scenario!='only_first':
                     self.metadata['controller_goal_transitions'].append({
@@ -1032,6 +966,7 @@ class Task(BaseTask):
 
 @configclass
 class TaskCfg(BaseTaskCfg):
+    policy_controls_termination = True
     step_lim = 4000
     max_save_frames = 2000
     video_size = (1120, 320)

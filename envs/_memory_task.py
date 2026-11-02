@@ -18,6 +18,7 @@ class MemoryTaskCfg(BaseTaskCfg):
     save_pre_move = True
     uniform_policy_recording = True
     final_acceptance_contract = True
+    policy_controls_termination = True
     policy_action_repeat = 2
     absolute_joint_zero_velocity_targets = True
     live_action_joint_state = True
@@ -71,7 +72,17 @@ class MemoryTask(BaseTask):
 
     def play_once(self):
         super().play_once()
+        self.finish_episode()
+
+    def finish_episode(self):
+        """Submit the policy's END and score the state at that instant."""
+        if self.phase_id == self.PHASE_TERMINAL:
+            return bool(self.eval_success)
+        if self.phase_id != self.PHASE_POLICY:
+            raise RuntimeError('finish_episode() requires the POLICY handoff')
         success = self.check_success()
+        self.eval_success = bool(success)
+        self.monitor = False
         reason = 'success' if success else (self.failure or 'execution_failure')
         self.metadata['terminal_reason'] = reason
         self.metadata['task_physical_verdict_step'] = self.step_count
@@ -82,6 +93,7 @@ class MemoryTask(BaseTask):
             from ._force_task_utils import record_terminal_observation
             record_terminal_observation(self, reason)
         self._save_metadata()
+        return self.eval_success
 
     def _get_observations(self):
         obs = super()._get_observations()
@@ -126,7 +138,7 @@ class MemoryTask(BaseTask):
         pass
 
     def check_early_stop(self):
-        return bool(self.failure)
+        return bool(self.failure or (self.phase_id == self.PHASE_TERMINAL and not self.eval_success))
 
     def move_center(self, position):
         pose = Pose(position, self._robot_manager.get_gripper_center_pose().q)

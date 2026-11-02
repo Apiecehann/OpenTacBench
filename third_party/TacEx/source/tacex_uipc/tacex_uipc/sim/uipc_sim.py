@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pathlib
 
+import numpy as np
+
 import omni.usd
 import usdrt
 import usdrt.Usd
@@ -27,6 +29,51 @@ from uipc.unit import GPa
 
 from tacex_uipc.objects import UipcObject
 from tacex_uipc.utils import MeshGenerator
+
+
+def _render_world_matrix(fabric_prim):
+    """Resolve the current render transform even without an FSD world cache."""
+    path = str(fabric_prim.GetPath())
+    xform = usdrt.Rt.Xformable(fabric_prim)
+    attr = xform.GetFabricHierarchyWorldMatrixAttr()
+    value = attr.Get() if attr else None
+    if value is not None:
+        matrix = np.asarray(value, dtype=np.float64)
+    elif xform.HasWorldXform():
+        # Legacy OmniHydra world attributes override the entire USD hierarchy.
+        position = xform.GetWorldPositionAttr()
+        orientation = xform.GetWorldOrientationAttr()
+        scale = xform.GetWorldScaleAttr()
+        transform = usdrt.Gf.Matrix4d(1.0)
+        transform.SetScale(usdrt.Gf.Vec3d(scale.Get()) if scale else usdrt.Gf.Vec3d(1.0))
+        rotation = usdrt.Gf.Matrix4d(1.0)
+        rotation.SetRotate(usdrt.Gf.Quatd(orientation.Get()) if orientation else usdrt.Gf.Quatd(1.0))
+        transform = transform * rotation
+        if position:
+            transform.SetTranslateOnly(position.Get())
+        matrix = np.asarray(transform, dtype=np.float64)
+    else:
+        usd_stage = omni.usd.get_context().get_stage()
+        usd_prim = usd_stage.GetPrimAtPath(path) if usd_stage is not None else None
+        if not usd_prim:
+            raise RuntimeError(f"Cannot resolve render transform for {path}: USD prim is missing")
+        usd_xform = UsdGeom.Xformable(usd_prim)
+        attr = xform.GetFabricHierarchyLocalMatrixAttr()
+        value = attr.Get() if attr else None
+        if value is None:
+            attr = xform.GetLocalMatrixAttr()
+            value = attr.Get() if attr else None
+        if value is None:
+            value = usd_xform.GetLocalTransformation() if usd_xform else np.eye(4)
+        matrix = np.asarray(value, dtype=np.float64)
+        # Read live Fabric ancestors, since PhysX may not write poses back to USD.
+        parent = usd_prim.GetParent()
+        if parent and not parent.IsPseudoRoot() and not (usd_xform and usd_xform.GetResetXformStack()):
+            fabric_parent = fabric_prim.GetStage().GetPrimAtPath(str(parent.GetPath()))
+            matrix = matrix @ _render_world_matrix(fabric_parent)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise RuntimeError(f"Invalid render transform for {path}: expected a finite 4x4 matrix")
+    return matrix
 
 
 @configclass
@@ -320,6 +367,10 @@ class UipcSim:
         self.update_render_meshes()
 
     def update_render_meshes(self, dt=0):
+        if self.isaac_sim is not None:
+            # Flush the robot/Fabric transforms before converting UIPC world
+            # vertices to the local frame that Hydra uses for each mesh.
+            self.isaac_sim.forward()
         all_trimesh_points = self.sio.simplicial_surface(2).positions().view().reshape(-1, 3)
         # triangles = self.sio.simplicial_surface(2).triangles().topo().view()
         for i, fabric_prim in enumerate(self._fabric_meshes):
@@ -327,8 +378,18 @@ class UipcSim:
             if i < len(self._fabric_mesh_offsets):
                 trimesh_points = trimesh_points + self._fabric_mesh_offsets[i]
 
+            matrix = _render_world_matrix(fabric_prim)
+            try:
+                inverse = np.linalg.inv(matrix[:3, :3])
+            except np.linalg.LinAlgError as exc:
+                raise RuntimeError(f"Non-invertible render transform for {fabric_prim.GetPath()}") from exc
+            trimesh_points = (trimesh_points - matrix[3, :3]) @ inverse
             fabric_mesh_points = fabric_prim.GetAttribute("points")
             fabric_mesh_points.Set(usdrt.Vt.Vec3fArray(trimesh_points))
+            # Keep culling bounds with the deforming surface. The rest-pose
+            # extent can lie entirely outside a moving tactile camera.
+            extent = usdrt.UsdGeom.Mesh(fabric_prim).GetExtentAttr()
+            extent.Set(usdrt.Vt.Vec3fArray([trimesh_points.min(0), trimesh_points.max(0)]))
         for line_renderer in self._line_renderers:
             line_renderer.update_line_render_mesh()
         # NOTE: Currently there is a 1 frame delay between the points we set and what's rendered in Isaac

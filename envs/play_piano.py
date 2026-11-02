@@ -1,16 +1,19 @@
-"""Pick up a tapping tool and play a fixed phrase on an 88-key piano."""
+"""Pick up a tapping tool and play a requested phrase on an 88-key piano."""
 import numpy as np
+import hashlib
+import json
+from pathlib import Path
 from collections import deque
 from transforms3d.quaternions import mat2quat
 
 from ._base_task import Pose, configclass
 from ._memory_task import MemoryTask, MemoryTaskCfg
-from ._tactile_memory import PianoScore, box_mesh
-from ._piano import keyboard_layout, build_cabinet, striker_mesh, finish_striker, press_delta, MELODY
+from ._tactile_memory import PianoScore, Note, box_mesh
+from ._piano_sequence import make_sequence,PianoAnnotations,DYNAMICS
+from ._piano import keyboard_layout, build_cabinet, striker_mesh, finish_striker, press_delta
 from ._piano_audio import PianoContacts, add_piano_audio
 
-TASK_INSTRUCTION = ("Pick up the tapping tool and play C4 C4 G4 G4 A4, the first five notes of Twinkle Twinkle Little Star. "
-                    "Alternate short-light and long-firm notes, starting short-light.")
+TASK_INSTRUCTION = "Pick up the tapping tool and play the requested notes in order."
 
 
 def _piano_cameras():
@@ -36,11 +39,18 @@ class TaskCfg(MemoryTaskCfg):
     plate = MemoryTaskCfg().plate
     plate.spawn.scale = (1.30, 1.70, 1.0)
     plate.init_state.pos = (.40, 0., 0.)
-    memory_timeout_seconds = 30.0
-    step_lim = 1800
-    max_save_frames = 1900
+    memory_timeout_seconds = 60.0
+    step_lim = 7200
+    max_save_frames = 7500
     cameras = _piano_cameras()
     video_size = (1520, 480)
+    piano_notes = None
+    piano_dynamics = None
+    piano_note_count = 6
+    piano_require_dynamics = True
+    piano_wrong_key_policy = 'fail'
+    piano_hold_seconds = .12
+    reset_time_limit = 600.0
 
 
 class Task(MemoryTask):
@@ -50,17 +60,132 @@ class Task(MemoryTask):
     striker_grasp_height = .085
 
     def __init__(self, cfg, **kwargs):
-        self.score = PianoScore(key_sequence=tuple(m-21 for m in MELODY), key_count=88)
+        if cfg.decimation!=1:
+            raise ValueError('Piano per-physics-step annotations require decimation=1')
+        self._piano_reset_options={}
+        self._set_sequence(cfg,np.random.default_rng(0))
         self.audio_contacts = PianoContacts()
         self.video_steps = []
         self.key_forces = np.zeros(88)
         self._key_force_history = deque((np.zeros(88) for _ in range(3)),maxlen=3)
         self.striker_released = False
         self._key_vertex_ids = None
-        # A compliant probe tip makes force controllable at the 60 Hz action
-        # cadence. Resolve deformations more finely than the default 0.4 mm.
-        cfg.uipc_sim.newton.velocity_tol = .01
+        # At 120 Hz this Newton stopping increment is about 8 micrometres,
+        # below the 10-micrometre landing command used by the expert.
+        cfg.uipc_sim.newton.velocity_tol = .001
         super().__init__(cfg, **kwargs)
+
+    def _set_sequence(self,cfg,rng):
+        options=self._piano_reset_options
+        self.sequence=make_sequence(options.get('notes',cfg.piano_notes),count=cfg.piano_note_count,
+            dynamics=options.get('dynamics',cfg.piano_dynamics),
+            holds=options.get('hold_seconds',cfg.piano_hold_seconds),rng=rng)
+        self.piano_annotations=PianoAnnotations(self.sequence,embodiment='tool',record_key_forces=True)
+        labels=self.piano_annotations
+        notes=tuple(Note(float(f),h,float(t)) for f,h,t in zip(labels.targets,self.sequence.holds,labels.tolerances))
+        self.score=PianoScore(cfg.sim.dt,key_sequence=tuple(m-21 for m in self.sequence.midi),
+            key_count=88,notes=notes,require_dynamics=cfg.piano_require_dynamics,
+            wrong_key_policy=cfg.piano_wrong_key_policy)
+        self._piano_observed_step=None
+        self._piano_force_step=None
+
+    def reset(self,seed=-1,instructions=None,options=None):
+        self._piano_reset_options=options or {}
+        return super().reset(seed=seed,instructions=instructions,options=options)
+
+    def _reset_idx(self,env_ids):
+        super()._reset_idx(env_ids)
+        # Robot state resets instantly; reset the original FEM gel and its
+        # attachment target to the same pose before advancing the solver.
+        for sensor in self._tactile_manager.tactiles.values():
+            sensor._write_gelpad_vertices(sensor._get_gelpad_points_for_current_attachment())
+            sensor.attachment._compute_aim_positions(0.)
+        self.uipc_sim.world.retrieve()
+        for sensor in self._tactile_manager.tactiles.values():
+            sensor._invalidate_gelpad_nodal_cache()
+        self.sim.forward()
+
+    def build_instruction(self):
+        return 'Pick up the tapping tool. '+self.sequence.instruction()
+
+    def get_episode_context(self):
+        context=super().get_episode_context()
+        context['piano_sequence']=self.sequence.as_dict()
+        context['piano_require_dynamics']=self.cfg.piano_require_dynamics
+        context['piano_dynamic_codes']=DYNAMICS
+        context['piano_timeout_seconds']=self.cfg.memory_timeout_seconds
+        return context
+
+    def _get_observations(self):
+        # Record current contacts before MemoryTask's post-step scoring hook.
+        # Reading an observation must not perform tool acquisition or scoring.
+        self._sample_key_forces()
+        obs=super()._get_observations()
+        obs['piano']=self.piano_annotations.update(self.step_count,self.cfg.sim.dt,
+            self.score.index,self.key_forces)
+        return obs
+
+    def _step(self,is_save=True):
+        before=getattr(self,'step_count',0)
+        record=(is_save and self.mode=='collect' and self.plan_success)
+        if record:
+            # Read the SDK command buffers before the original physics step.
+            # This covers planner, gripper and servo commands without changing
+            # their execution or substituting measured joint positions.
+            robot=self._robot_manager.robot
+            command=dict(before_step=before,phase_id=int(self.phase_id),
+                qpos_target=robot.data.joint_pos_target[0].detach().cpu().tolist(),
+                qvel_target=robot.data.joint_vel_target[0].detach().cpu().tolist())
+        super()._step(is_save)
+        if self.step_count!=before:
+            self._sample_key_forces()
+            self.piano_annotations.update(self.step_count,self.cfg.sim.dt,self.score.index,self.key_forces)
+            if record:
+                command['physics_step']=int(self.step_count)
+                path=self.save_root/'commands'/f'{self.cfg.seed}.jsonl'
+                path.parent.mkdir(parents=True,exist_ok=True)
+                with path.open('a',encoding='utf-8') as stream:
+                    stream.write(json.dumps(command)+'\n')
+
+    def save_to_hdf5(self):
+        super().save_to_hdf5()
+        import h5py
+        sensors={}
+        for name,tactile in self._tactile_manager.tactiles.items():
+            cfg=tactile.sensor.cfg
+            camera=cfg.sensor_camera_cfg
+            marker=cfg.marker_motion_sim_cfg
+            optical=cfg.optical_sim_cfg
+            calibration=Path(optical.calib_folder_path)
+            sensors[name]=dict(sensor_type='gsmini',interface='VisualTactileSensor.get_observations',
+                resolution_width_height=list(camera.resolution),clipping_range_m=list(camera.clipping_range),
+                update_period_s=float(cfg.update_period),data_types=list(cfg.data_types),
+                marker_shape=list(marker.marker_shape),marker_count=int(marker.marker_params.num_markers),
+                marker_sampling='original Mini grid, visibility filtering and repeat-last padding to 64',
+                marker_interval=list(marker.marker_interval),camera_to_surface_m=float(marker.camera_to_surface),
+                real_size_m=list(marker.real_size),calibration_directory=str(calibration),
+                calibration_sha256={str(p.relative_to(calibration)):hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(calibration.rglob('*')) if p.is_file()},
+                gel_modulus_MPa=float(tactile.cfg.gelpad_cfg.constitution_cfg.youngs_modulus),
+                gel_mass_density_kg_m3=float(tactile.cfg.gelpad_cfg.mass_density))
+        schema=dict(version=2,depth_units='mm',depth_meaning='original Mini height_map camera distance',
+            marker_units='pixels',marker_axes='reference/current, marker index, x/y',
+            marker_shape=[2,64,2],force_units='N',force_key_order='MIDI 21 through 108',
+            privileged_force_trace=f'piano_steps/{self.cfg.seed}.jsonl',
+            command_trace=f'commands/{self.cfg.seed}.jsonl',
+            command_meaning='original SDK position/velocity targets applied over (before_step, physics_step]',
+            command_joint_names=list(self._robot_manager.robot.joint_names),
+            sensors=sensors)
+        (self.save_root/'sensor_config.json').write_text(json.dumps(schema,indent=2)+'\n',encoding='utf-8')
+        self.metadata['piano_recording']=schema
+        with h5py.File(self.save_path,'a') as data:
+            data.attrs['piano_recording_schema_version']=2
+            for name in sensors:
+                data[f'tactile/{name}/depth'].attrs['units']='mm'
+                data[f'tactile/{name}/marker'].attrs['units']='pixels'
+                data[f'tactile/{name}/marker'].attrs['axes']='reference/current, marker index, x/y'
+            data['piano'].attrs['privileged_fields']='actual_*; contact; use target_midi as public input'
+        self._save_metadata()
 
     def create_actors(self):
         self.keybed = self.add_box("keyboard_base",(.24,1.315,.034),(.54,0,.006),
@@ -117,8 +242,7 @@ class Task(MemoryTask):
         self.failure = ""
         self.audio_contacts = PianoContacts()
         self.video_steps = []
-        self.score = PianoScore(self.cfg.sim.dt,
-                               key_sequence=tuple(m-21 for m in MELODY), key_count=88)
+        self._set_sequence(self.cfg,self.rng)
         self.key_forces = np.zeros(88)
         self._key_force_history = deque((np.zeros(88) for _ in range(3)),maxlen=3)
         self.striker_released = False
@@ -138,6 +262,8 @@ class Task(MemoryTask):
         super().pre_move()
 
     def observe_task(self):
+        if self._piano_observed_step==self.step_count: return
+        self._piano_observed_step=self.step_count
         center = self._robot_manager.get_gripper_center_pose().p
         if not self.striker_released:
             near = np.linalg.norm(center-(np.asarray(self.striker_position)+[0,0,self.striker_grasp_height])) < .02
@@ -146,6 +272,20 @@ class Task(MemoryTask):
                 if np.all(depth < 27.9):
                     self.striker.remove_animate(force=True)
                     self.striker_released = True
+        self._sample_key_forces()
+        self.audio_contacts.advance(self.step_count, self.key_forces)
+        previous = self.score.index
+        self.piano_annotations.update(self.step_count,self.cfg.sim.dt,previous,self.key_forces)
+        self.score.advance(self.key_forces)
+        if self.score.index != previous or self.score.failure:
+            self.metadata.setdefault('piano_contact_events',[]).append(dict(
+                step=self.step_count,previous_note=previous,next_note=self.score.index,
+                failure=self.score.failure,forces_N={str(i):float(f) for i,f in enumerate(self.key_forces) if f>.01}))
+        self.failure = self.failure or self.score.failure
+
+    def _sample_key_forces(self):
+        if self._piano_force_step==self.step_count: return
+        self._piano_force_step=self.step_count
         if self._key_vertex_ids is None:
             starts = [int(key.geo_slot_list[0].geometry().meta().find('global_vertex_offset').view()[0])
                       for key in self.keys]
@@ -161,14 +301,6 @@ class Task(MemoryTask):
         self.key_forces = np.maximum(0.,np.bincount(labels[labels>=0],
             weights=loads[labels>=0],minlength=88))
         self._key_force_history.append(self.key_forces.copy())
-        self.audio_contacts.advance(self.step_count, self.key_forces)
-        previous = self.score.index
-        self.score.advance(self.key_forces)
-        if self.score.index != previous or self.score.failure:
-            self.metadata.setdefault('piano_contact_events',[]).append(dict(
-                step=self.step_count,previous_note=previous,next_note=self.score.index,
-                failure=self.score.failure,forces_N={str(i):float(f) for i,f in enumerate(self.key_forces) if f>.01}))
-        self.failure = self.failure or self.score.failure
 
     def _play_once(self):
         self.metadata['piano_pressure_trace'] = []
@@ -205,28 +337,42 @@ class Task(MemoryTask):
             position = top+offset+[0,0,.003]
             if i == 0:
                 self.move_center(position)
-            elif not self._line_to(position):
-                break
+            else:
+                above=position.copy()
+                above[2]=self._robot_manager.get_gripper_center_pose().p[2]
+                if not self._line_to(above) or not self._line_to(position): break
+            # Resolve the remaining clearance after transport: the compliant
+            # tool can move within the grasp. Use the existing force servo,
+            # with a slower landing before a sustained contact preload.
+            gap=float(self.striker.vertices[:,2].min()-self.keys[key_index].vertices[patch,2].max())
+            landing_z=float(position[2])-max(0.,gap-.002)
+            preloaded=False
+            landing_step=.000010
+            geometry['landing_max_descent_m']=landing_step
             reached = False
-            for _ in range(180):
+            for _ in range(300):
                 # Limit impact on landing; contact hysteresis handles the small
                 # initial load transient independently of the note-force hold.
                 # The first contact can be much stiffer than the settled tip.
                 # Keep each 60 Hz descent below 75 microns so a low initial
                 # force cannot trigger a 250-micron impact on the next tick.
-                dz,control_force = press_delta(
-                    [forces[key_index] for forces in self._key_force_history],
-                    note.force_N,note.tolerance_N)
+                history=[forces[key_index] for forces in self._key_force_history]
+                preloaded=bool(preloaded or min(history)>=min(.8,note.force_N*.5))
+                dz,control_force = press_delta(history,note.force_N,note.tolerance_N)
+                landing=bool(not preloaded and position[2]<=landing_z)
+                if landing:
+                    dz=max(dz,-landing_step)
                 position[2] += dz
                 continued = self.servo_center(position)
                 self.metadata['piano_pressure_trace'].append(dict(step=self.step_count,note=i,
                     key=key_index,force_N=float(self.key_forces[key_index]),
                     controller_force_N=control_force,
                     max_force_N=float(self.key_forces.max()),max_key=int(self.key_forces.argmax()),
-                    target_z=float(position[2])))
+                    target_z=float(position[2]),landing=landing))
                 if not continued:
                     break
-                if self.score.stable_steps*self.cfg.sim.dt >= note.hold_s:
+                if (self.score.stable_steps*self.cfg.sim.dt >= note.hold_s
+                        and abs(control_force-note.force_N)<=note.tolerance_N):
                     reached = True
                     break
             if not reached:
@@ -246,11 +392,12 @@ class Task(MemoryTask):
                     break
             # The strike points lie in front of the black keys. Stay just above
             # the white keys between adjacent notes, with a larger final lift.
-            position[2] += .015 if i == len(self.score.notes)-1 else .004
+            position[2]=max(position[2],float(offset[2])+.085+.025)
             if not self._line_to(position, spacing=.003):
                 break
         self.metadata["piano_result"] = dict(success=self.check_success(),failure=self.failure,
-            notes=self.score.events,articulation="short_light_first_alternating",
+            notes=self.score.events,sequence=self.sequence.as_dict(),
+            require_dynamics=self.cfg.piano_require_dynamics,
             tool_grasped=self.striker_released,
             force_source="physical UIPC key-top contact resultant",
             policy_steps=self.step_count-self.policy_start_step)
@@ -261,9 +408,17 @@ class Task(MemoryTask):
     def get_frame_shot(self, obs):
         frame = super().get_frame_shot(obs)
         self.video_steps.append(int(self.step_count))
+        if 'piano' in obs:
+            from ._piano_sequence import draw_piano_label
+            import torch
+            frame=torch.as_tensor(draw_piano_label(frame.cpu().numpy(),obs['piano']),device=frame.device)
         return frame
 
     def clean_cache(self, mean_steps=0.0, result=None):
+        annotation=self.save_root/'piano_steps'/f'{self.cfg.seed}.jsonl'
+        annotation.parent.mkdir(parents=True,exist_ok=True)
+        self.piano_annotations.write_jsonl(annotation)
+        self.metadata['piano_annotation_path']=str(annotation.relative_to(self.save_root))
         super().clean_cache(mean_steps, result)
         if result is not None and self.cfg.video_frequency > 0:
             video = self.save_video_path.with_name(f"{self.cfg.seed}_{result}.mp4")

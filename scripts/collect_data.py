@@ -15,6 +15,8 @@ sys.path.append('.')
 parser = argparse.ArgumentParser(
     description="Collect data"
 )
+from isaaclab.app import AppLauncher
+AppLauncher.add_app_launcher_args(parser)
 parser.add_argument(
     "task",
     type=str,
@@ -35,6 +37,12 @@ parser.add_argument(
     type=int,
     default=-1,
 )
+parser.add_argument('--strap-color-mode', '--strap_color_mode', dest='strap_color_mode',
+    choices=('blue', 'tricolor'), default=None,
+    help='Strap only: blue bands or blue/yellow/red bands; overrides task_parameters.strap_color_mode')
+parser.add_argument('--force-sequence', '--force_sequence', dest='force_sequence',
+    type=float, nargs=4, metavar=('F1_N','T1_S','F2_N','T2_S'),
+    help='Strap only: two forces from 0 N to the configured overload limit (default 24 N), with positive hold durations')
 parser.add_argument(
     "--max_seed",
     type=int,
@@ -150,9 +158,6 @@ args_cli = parser.parse_args()
 if args_cli.gpu is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = args_cli.gpu
 
-from isaaclab.app import AppLauncher
-AppLauncher.add_app_launcher_args(parser)
-
 # parse the arguments
 args_cli.enable_cameras = True
 args_cli.num_envs = 1
@@ -201,6 +206,14 @@ task_config, task_config_file = get_config(
     default_root=Path(__file__).parent.parent / 'task_config', 
     type='yaml'
 )
+if args_cli.strap_color_mode is not None:
+    if args_cli.task != 'tension_strap':
+        parser.error('--strap-color-mode applies only to tension_strap')
+    task_config.setdefault('task_parameters', {})['strap_color_mode'] = args_cli.strap_color_mode
+if args_cli.force_sequence is not None:
+    if args_cli.task != 'tension_strap':
+        parser.error('--force-sequence applies only to tension_strap')
+    task_config.setdefault('task_parameters', {})['force_time_sequence'] = args_cli.force_sequence
 
 if task_config.get('render_frequency', 1) == 0:
     args_cli.livestream = 2
@@ -252,7 +265,7 @@ def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
         suc_map_path = task.save_root / 'suc_map.txt'
         if suc_map_path.exists():
             with open(suc_map_path, 'r') as f:
-                suc_map = f.read().strip().split(' ')
+                suc_map = f.read().split()
             suc_num = sum([1 for s in suc_map if s == '1'])
             seed = len(suc_map)
             log(f"Use seed with {suc_num} successful episodes. Starting from seed {seed}.")
@@ -291,7 +304,9 @@ def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
         
         seed += 1
     
-    log(f'Complete collection, success rate: {suc_num}/{seed} ({(suc_num / seed) * 100:.2f}%)')
+    attempts = len(suc_map)
+    rate = 100.0 * suc_num / attempts if attempts else 0.0
+    log(f'Complete collection, success rate: {suc_num}/{attempts} ({rate:.2f}%)')
 
     task.close()
     simulation_app.close()
@@ -320,6 +335,8 @@ def main():
 
     task_module = importlib.import_module(f"envs.{task_file_name}")
     env_cfg:'BaseTaskCfg' = task_module.TaskCfg()
+    from envs._piano_sequence import configure_piano_task
+    configure_piano_task(env_cfg,task_config)
     if "background" in task_config:
         env_cfg.background = str(task_config["background"])
     if hasattr(env_cfg, "target_block"):

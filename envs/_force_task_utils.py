@@ -394,15 +394,22 @@ def configure_final_task(cfg, parameters, *, max_policy_seconds):
     cfg.step_lim = int(round(max_policy_seconds * POLICY_HZ))
     cfg.max_save_frames = max(int(cfg.max_save_frames), cfg.step_lim + 1200)
 
+def force_action_indices(manager):
+    """Public qpos order is the named arm chain followed by one gripper DOF."""
+    import torch
+    return torch.cat((torch.as_tensor(manager._arm_ids,dtype=torch.long),
+                      torch.as_tensor(manager._gripper_ids,dtype=torch.long)[:1]))
+
+
 def execute_joint_target(task, arm=None, gripper=None, *, ticks=ACTION_REPEAT):
     """The expert uses exactly the public position-action path."""
     import torch
     manager = task._robot_manager
-    q = manager.get_observations(['joint'])['joint'][:8].clone()
+    q = manager.get_observations(['joint'])['joint'][force_action_indices(manager)].clone()
     if arm is not None:
-        q[:7] = torch.as_tensor(arm, dtype=q.dtype, device=q.device).reshape(-1)
+        q[:-1] = torch.as_tensor(arm, dtype=q.dtype, device=q.device).reshape(-1)
     if gripper is not None:
-        q[7] = float(gripper)
+        q[-1] = float(gripper)
     executed, success = task.take_action(q, action_type='qpos', force=True, action_repeat=int(ticks))
     return bool(executed and not task.check_early_stop() and task.plan_success), bool(success)
 
@@ -558,9 +565,20 @@ def _rounded_box(stage, path, center, size, radius, mat):
     _bind(mesh.GetPrim(),mat)
     return mesh
 
+def strap_color_palette(parameters):
+    """Linear RGB for the left/middle/right bands and the dark grip tabs."""
+    mode = parameters.get('strap_color_mode', 'blue')
+    if mode not in ('blue', 'tricolor'):
+        raise ValueError("strap_color_mode must be 'blue' or 'tricolor'")
+    palette = np.asarray([[50,126,207], [253,230,64], [253,77,54], [55,58,62]], dtype=float) / 255.
+    if mode == 'blue':
+        palette[:3] = palette[0]
+    return np.where(palette <= .04045, palette / 12.92, ((palette + .055) / 1.055) ** 2.4)
+
+
 class ForceTaskScene:
     def __init__(self,task,kind):
-        from pxr import Sdf, Usd, UsdGeom, UsdShade
+        from pxr import Usd, UsdGeom
         self.task=task
         import omni.usd
         stage=omni.usd.get_context().get_stage()
@@ -595,31 +613,36 @@ class ForceTaskScene:
                             _bind(prim,rubber)
                             if task.params.get('geometry') == 'bundle':
                                 self.color_strap(mesh)
-                                reader=UsdShade.Shader.Define(stage,root+'/Looks/Elastomer/Color')
-                                reader.CreateIdAttr('UsdPrimvarReader_float3')
-                                reader.CreateInput('varname',Sdf.ValueTypeNames.Token).Set('displayColor')
-                                reader.CreateOutput('result',Sdf.ValueTypeNames.Float3)
-                                shader=UsdShade.Shader(stage.GetPrimAtPath(root+'/Looks/Elastomer/Shader'))
-                                shader.GetInput('diffuseColor').ConnectToSource(reader.ConnectableAPI(),'result')
             else:
                 _rounded_box(stage,root+'/socket_mount',(.55,0.,.001),(.125,.125,.002),.014,metal)
 
 
     def color_strap(self, mesh, rest_points=None):
-        from pxr import Vt
-        task=self.task
-        points=(np.asarray(mesh.GetPointsAttr().Get(),dtype=float)
-                if rest_points is None else np.asarray(rest_points))
-        faces=np.asarray(mesh.GetFaceVertexIndicesAttr().Get(),dtype=int).reshape(-1,3)
-        centers=points[faces].mean(axis=1)-task.base
-        palette=np.asarray([[50,126,207],[253,230,64],[253,77,54],[55,58,62]],dtype=float)/255.
-        palette=np.where(palette<=.04045,palette/12.92,((palette+.055)/1.055)**2.4)
-        which=np.full(len(faces),3,dtype=int)
-        band=(centers[:,2]>.01601)&(centers[:,2]<.13199)
-        band_centers=np.asarray(task.params.get('band_centers_m',[-.031,0.,.031]))
-        which[band]=np.abs(centers[band,0,None]-band_centers[None,:]).argmin(axis=1)
+        """Bind colors by rest position in strap-local coordinates, even after rupture."""
+        from pxr import UsdShade, Vt
+        task = self.task
+        points = (np.asarray(mesh.GetPointsAttr().Get(), dtype=float)
+                  if rest_points is None else np.asarray(rest_points))
+        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=int).reshape(-1, 3)
+        # USD/Fabric points are already local. Subtracting task.base here would
+        # shift every band toward the left-hand (blue) region.
+        centers = points[faces].mean(axis=1)
+        palette = strap_color_palette(task.params)
+        which = np.full(len(faces), 3, dtype=int)
+        band = (centers[:, 2] > .01601) & (centers[:, 2] < .13199)
+        band_centers = np.asarray(task.params.get('band_centers_m', [-.025, 0., .025]))
+        which[band] = np.abs(centers[band, 0, None] - band_centers[None, :]).argmin(axis=1)
         mesh.CreateDisplayColorAttr(Vt.Vec3fArray.FromNumpy(palette[which].astype(np.float32)))
         mesh.GetDisplayColorPrimvar().SetInterpolation('uniform')
+        # Constant per-region materials also survive RTX topology replacement.
+        binding = UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+        root = task.scene.env_prim_paths[0] + '/force_task_presentation'
+        for index, color in enumerate(palette):
+            material = _material(mesh.GetPrim().GetStage(), root + f'/Looks/Strap{index}', tuple(color), .78)
+            face_ids = np.flatnonzero(which == index).astype(np.int32)
+            subset = binding.CreateMaterialBindSubset(f'color_{index}', Vt.IntArray.FromNumpy(face_ids))
+            UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)
+        return which
 
 
 # Force task tracking
@@ -737,7 +760,7 @@ def timing_context(task):
         'video_frequency': int(cfg.video_frequency),
         'video_fps': float(task.video_handler.fps),
         'joint_position_units': 'arm radians, fingers meters',
-        'joint_action_semantics': 'absolute qpos, first8 of recorded9 joints',
+        'joint_action_semantics': 'absolute qpos, named arm joints then first gripper joint',
         'joint_action_start_state': 'live_physx' if getattr(cfg,'live_action_joint_state',False) else 'observation_cache',
         'quaternion_order': 'wxyz',
         'position_units': 'meters',
@@ -746,6 +769,10 @@ def timing_context(task):
         'actor_surface_cache_enabled': bool(getattr(cfg, 'cache_actor_surfaces', False)),
         'same_step_tactile_depth_reuse': bool(getattr(cfg, 'reuse_same_step_tactile_depth', False)),
     }
+    manager = getattr(task, '_robot_manager', None)
+    if manager is not None:
+        result['action_joint_names'] = manager._arm_joint_names + manager._gripper_joint_names[:1]
+        result['action_joint_indices'] = force_action_indices(manager).detach().cpu().tolist()
     tactiles = getattr(getattr(cfg, 'robot', None), 'tactiles', [])
     result['gel_modulus_mpa'] = {
         str(t.name): float(t.gelpad_cfg.constitution_cfg.youngs_modulus)
@@ -767,8 +794,9 @@ def append_public_action(task, target, initial, before_step, phase_id, requested
         if hasattr(value,"detach"):value=value.detach().cpu().numpy()
         return np.asarray(value,dtype=float).reshape(-1)
     q=array(target);q0=array(initial)
-    if q.shape!=(8,) or q0.shape!=(8,) or not np.isfinite(np.r_[q,q0]).all():
-        raise ValueError("Public action evidence must contain eight finite joint targets")
+    size=len(task._robot_manager._arm_ids)+1
+    if q.shape!=(size,) or q0.shape!=(size,) or not np.isfinite(np.r_[q,q0]).all():
+        raise ValueError(f"Public action evidence must contain {size} finite joint targets")
     row=dict(before_step=int(before_step),after_step=after,
              requested_repeat=int(requested_repeat),qpos=q.tolist(),initial_qpos=q0.tolist())
     path=Path(str(path).format(seed=int(getattr(cfg,"seed",0))))
@@ -794,8 +822,10 @@ def original_action_schedule(steps,joints,start,command_path,*,terminal_step=Non
     or success feedback enters command generation. Each source segment is named.
     """
     steps=np.asarray(steps,dtype=int);joints=np.asarray(joints,dtype=float)
-    if joints.shape!=(len(steps),8) or not np.isfinite(joints).all():
-        raise ValueError("Recorded observations must contain finite eight-joint rows")
+    if (joints.ndim!=2 or joints.shape[0]!=len(steps) or joints.shape[1] not in (7,8)
+            or not np.isfinite(joints).all()):
+        raise ValueError("Recorded control rows require six or seven arm joints plus one gripper")
+    width=joints.shape[1]
     if len(steps)<2 or np.any(np.diff(steps)<=0):raise ValueError("Invalid observation clock")
     path=Path(command_path);raw=path.read_bytes()
     commands=[json.loads(line) for line in raw.splitlines() if line.strip()]
@@ -804,7 +834,7 @@ def original_action_schedule(steps,joints,start,command_path,*,terminal_step=Non
     def add(end,target,kind,repeat=None):
         nonlocal cursor
         target=np.asarray(target,dtype=float)
-        if target.shape!=(8,) or not np.isfinite(target).all():raise ValueError("Invalid original target")
+        if target.shape!=(width,) or not np.isfinite(target).all():raise ValueError("Invalid original target")
         ticks=int(end-cursor) if repeat is None else int(repeat)
         if not 1<=ticks<=40:raise ValueError("Action evidence has an invalid interval")
         if end<=cursor or end-cursor>ticks:raise ValueError("Action evidence clock is inconsistent")
@@ -844,17 +874,22 @@ def take_force_task_action(task, action, *, action_type="qpos", force=True,
     repeat = task.cfg.policy_action_repeat if action_repeat is None else action_repeat
     if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
         raise ValueError("action_repeat must be a positive integer")
+    policy_end = getattr(task.cfg, "policy_controls_termination", False)
+    if policy_end and task.phase_id == task.PHASE_TERMINAL:
+        return False, task.eval_success
     if task.take_action_cnt >= task.cfg.step_lim or task.eval_success:
         return True, task.eval_success
     target = torch.as_tensor(action, dtype=torch.float32, device=task.device).reshape(-1)
-    if target.shape != (8,) or not bool(torch.isfinite(target).all()):
-        raise ValueError("Force-task actions must contain eight finite joint targets")
+    manager = task._robot_manager
+    indices = force_action_indices(manager)
+    if target.shape != (len(indices),) or not bool(torch.isfinite(target).all()):
+        raise ValueError(f"Force-task actions require {len(indices)} finite joint targets")
     task.take_action_cnt += 1
     manager = task._robot_manager
     if getattr(task.cfg, "live_action_joint_state", True):
-        initial = manager.robot.root_physx_view.get_dof_positions()[0, :8].clone()
+        initial = manager.robot.root_physx_view.get_dof_positions()[0, indices].clone()
     else:
-        initial = manager.get_observations(["joint"])["joint"][:8].clone()
+        initial = manager.get_observations(["joint"])["joint"][indices].clone()
     step, phase = task.step_count, task.phase_id
     try:
         for index in range(repeat):
@@ -862,7 +897,9 @@ def take_force_task_action(task, action, *, action_type="qpos", force=True,
             manager.set_arm(command[:-1], vel=joint_velocity, force=force)
             manager.set_gripper(command[-1], force=force)
             task._step()
-            if task.check_success():
+            # These tasks are scored when the policy submits END. Physical
+            # success must neither latch eval_success nor shorten an action.
+            if not policy_end and task.check_success():
                 task.eval_success = True
             if task.eval_success or task.check_early_stop() or not task.plan_success:
                 break
@@ -1003,6 +1040,11 @@ def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
         files = [repo / "envs" / (name + ".py"), Path(__file__).resolve(),
                  repo / "envs/_base_task.py", repo / "envs/robot/robot.py",
                  repo / "envs/utils/data.py", repo / "scripts" / ("collect_data.py" if mode == "collect" else "eval_policy.py")]
+        if name == 'tension_strap':
+            files += [repo / 'envs/_strap_sequence.py', repo / 'scripts/validate_final_task_episode.py']
+        if config.get("task_parameters",{}).get("embodiment")=="aloha_vx300s":
+            files += [repo/"envs/robot/aloha_assets.py",repo/"envs/robot/robot_cfg.py"]
+            files += [p for p in (repo/"assets/embodiments/aloha").rglob("*") if p.is_file()]
         if deploy.get("policy_name") == "openpi":
             files += list((repo / "policy/openpi").glob("*.py"))
         calibration = config.get("task_parameters", {}).get("calibration")
@@ -1045,6 +1087,12 @@ def dispatch_force_task_seeds(mode, args, *, config=None, config_path=None):
                        *sys.argv[1:], "--start_seed", str(seed), "--max_seed", str(seed),
                        "--episode_num" if mode == "collect" else "--total_num", "1"]
             timeout = float(config.get("max_episode_seconds", 2200)) + 900
+            if name=='tension_strap':
+                from envs._strap_sequence import StrapAcceptanceLimits
+                declared=StrapAcceptanceLimits.from_parameters(config.get('task_parameters',{}))
+                # Long requested holds need wall time as well as physics/frame
+                # budgets; this solver commonly runs slower than real time.
+                timeout=max(timeout,60*declared.timeout_seconds+900)
             if not math.isfinite(timeout) or timeout <= 0:
                 raise ValueError("Invalid worker wall-time limit")
             print(f"{name}: {mode} seed {seed}, log {attempt / 'launch.log'}", flush=True)
@@ -1161,6 +1209,10 @@ def run_force_task_episode(task, *, seed, policy=None, instructions=None,
             task._set_phase(task.PHASE_TERMINAL,
                             terminal_reason=task.metadata["success_diagnostics"]["terminal_reason"])
         success = bool(task.plan_success and task.check_success() and not task.check_early_stop())
+        if policy is not None and getattr(task.cfg, "policy_controls_termination", False):
+            # Running out of the action budget is not a policy END, even if
+            # the object briefly passed through a successful state.
+            success = bool(success and task.eval_success and task.phase_id == task.PHASE_TERMINAL)
         row["result"] = "success" if success else "fail"
         row["terminal_reason"] = task.terminal_reason or ("success" if success else "incomplete")
         if policy is None and success:

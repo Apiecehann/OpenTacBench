@@ -79,6 +79,10 @@ class Robot:
 
     def __init__(self):
         self.commands = []
+        self._arm_ids = torch.arange(7)
+        self._gripper_ids = torch.tensor([7,8])
+        self._arm_joint_names = [f'panda_joint{i}' for i in range(1,8)]
+        self._gripper_joint_names = ['panda_finger_joint1','panda_finger_joint2']
         self.live = torch.zeros(9)
         self.robot = NS(root_physx_view=NS(get_dof_positions=lambda: self.live[None]))
         self.cached = torch.ones(9)
@@ -428,6 +432,44 @@ def test_vase_validator_keeps_925_cleaning_and_95_pressure_separate(tmp_path, cl
                                policy_start_sim_step=10, save_frequency=2, terminal_reason="success")
     report = validate_final(episode, expect="success")
     assert report["valid"] == valid, report
+
+
+# LOCAL DEVIATION (2026-11-02): upstream's
+# test_bulb_validator_accepts_explicit_end_and_preserves_physical_gates is not
+# carried.  Its submission-source, hold-steps and torque gates belong to
+# upstream's explicit-END success criterion; this branch's bar is the seated
+# physical state (Task.check_success), so the validator mirrors that gate
+# instead -- covered below.
+@pytest.mark.parametrize('turns,advance,seat,valid',[
+    (.49,.006,4.,False), (.5,.006,4.,True), (1.2,.006,4.,True),
+    (2.,.006,4.,True), (2.01,.006,4.,False), (1.2,.004,4.,False),
+    (1.2,.006,3.,False)])
+def test_bulb_validator_mirrors_the_seat_gate(tmp_path,turns,advance,seat,valid):
+    from scripts.validate_final_task_episode import validate_final
+    episode=tmp_path/'hdf5/0.hdf5';episode.parent.mkdir()
+    timing=dict(physics_dt_s=1/120,decimation=1,save_frequency=2,
+        policy_observation_dt_s=1/60,policy_action_repeat=2,policy_action_dt_s=1/60,
+        video_frequency=2,video_fps=60,quaternion_order='wxyz',position_units='meters',
+        pose_frame='world',zero_velocity_targets=True)
+    meta=dict(result='success',bulb_accepted=True,bulb_failure=None,
+        bulb_submission_source='expert_submitted_end',bulb_submission_stationary_steps=0,
+        bulb_hold_steps=132,thread_physical_spec=dict(handedness=1),
+        bulb_light=dict(phase='terminal',glass_emission=False),
+        bulb_final=dict(probe_complete=True,formal_net_turns=turns,
+            torque_Nm=.12,signed_torque_Nm=.12,formal_advance_m=advance,
+            phase_error_m=0.,center_drift_m=0.,tilt_deg=0.,seat_force_N=seat))
+    (tmp_path/'metadata.json').write_text(json.dumps({'0':meta}))
+    with h5py.File(episode,'w') as data:
+        data.attrs['episode_context_json']=json.dumps(dict(task='bulb_tightening',seed=0,timing_contract=timing))
+        data['step']=[8,12,14,16];data['phase/sim_step']=[8,12,14,16]
+        data['phase/id']=[0,1,1,2];data['phase/policy_step']=[-1,2,4,6]
+        data['phase/name']=np.array([b'pre_move',b'policy',b'policy',b'terminal'])
+        data['phase/is_boundary']=[1,1,0,1]
+        data['phase'].attrs.update(pre_move_saved_frames=1,policy_saved_frames=2,
+            action_saved_frames=2,terminal_saved_frames=1,policy_start_saved_index=1,
+            policy_start_sim_step=10,save_frequency=2,terminal_reason='success')
+    report=validate_final(episode,expect='success')
+    assert report['valid'] is valid,report
 
 
 @pytest.mark.parametrize("failure", ["timeout", "invalid_json"])

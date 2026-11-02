@@ -934,6 +934,7 @@ SUCCESS_TILT_TOLERANCE_DEG = 6.0
 
 @configclass
 class TaskCfg(BaseTaskCfg):
+    policy_controls_termination = True
     cameras = [
         CameraCfg(
             name="head",
@@ -1319,6 +1320,18 @@ def box_mesh(width, depth, height, counts=(5,5,5)):
 # Bulb tightening
 
 class Task(LegacyBulbTask):
+    def load_robot_and_sensors(self,cfg):
+        cfg=super().load_robot_and_sensors(cfg)
+        embodiment=self.params.get('embodiment','franka_panda')
+        if embodiment=='aloha_vx300s':
+            if cfg.tactile_sensor_type!='gsmini' or getattr(cfg,'dense_gelpad',False):
+                raise ValueError('ALOHA uses the original standard GelSight Mini assembly')
+            from .robot.aloha_assets import with_aloha_arm
+            cfg.robot=with_aloha_arm(cfg.robot)
+        elif embodiment!='franka_panda':
+            raise ValueError(f'Unknown bulb embodiment: {embodiment}')
+        return cfg
+
     def __init__(self,cfg,**kwargs):
         self.params=task_parameters(cfg)
         from ._force_task_utils import motion_speed_scale
@@ -1343,7 +1356,10 @@ class Task(LegacyBulbTask):
         offset=np.asarray(self.params.get('socket_xy_offset_m',rng.uniform(-.02,.02,2)),float)
         if offset.shape!=(2,) or not np.all(np.isfinite(offset)) or np.any(np.abs(offset)>.02):
             raise ValueError('Socket XY displacement must stay within +/- 2 cm')
-        self.socket_position=np.r_[np.array([.55,0.])+offset,.002]
+        self.socket_xy_center=np.asarray(self.params.get('socket_xy_center_m',[.55,0.]),float)
+        if self.socket_xy_center.shape!=(2,) or not np.isfinite(self.socket_xy_center).all():
+            raise ValueError('Socket XY center must contain two finite coordinates in meters')
+        self.socket_position=np.r_[self.socket_xy_center+offset,.002]
         self.seat_top=float(self.params.get('seat_top_m',.022))
         self.target_torque=float(self.params.get('target_torque_Nm',.120))
         self.torque_tolerance=float(self.params.get('torque_tolerance_Nm',.012))
@@ -1494,7 +1510,9 @@ class Task(LegacyBulbTask):
         self.metadata['constraint_contract']='socket and lower seat fixed; bulb free after first grasp including regrasp'
         self.metadata['remaining_geometric_turns']=self.thread_spec.nominal_free_travel_m/self.thread_spec.lead_m
         self.metadata['thread_physical_spec']=dict(self.thread_spec.__dict__)
-        self.metadata['socket_xy_offset_m']=(self.socket_position[:2]-[.55,0.]).tolist()
+        self.metadata['socket_xy_center_m']=self.socket_xy_center.tolist()
+        self.metadata['socket_xy_offset_m']=(self.socket_position[:2]-self.socket_xy_center).tolist()
+        self.metadata['embodiment']=self.params.get('embodiment','franka_panda')
         self._probe_seen_positive=False;self._probe_seen_negative=False;self._probe_physical_complete=False
         self._physical_probe=ReversibleThreadProbe(track_grasp_origin=True)
         self._physical_trace_path=self.work/'physical_trace.jsonl'
@@ -1742,6 +1760,8 @@ class Task(LegacyBulbTask):
         # seat the bulb.  Damage still ends the episode here, and that verdict
         # is a failure -- which is the right answer for a bulb that was
         # dropped or cracked before it was scored.
+        # Kept alongside upstream's explicit finish_episode() (2026-11-02):
+        # the eval server scores through check_success and never calls END.
         if self._accepted_result is not None:
             return bool(self._accepted_result),bool(self._accepted_result)
         executed,_=super().take_action(action,*args,**kwargs)
@@ -1752,6 +1772,17 @@ class Task(LegacyBulbTask):
             return bool(executed and not self.failure),bool(self._accepted_result)
         return executed,False
 
+    def finish_episode(self):
+        """Score only the explicit policy END, never a stationary command."""
+        if self.phase_id == self.PHASE_TERMINAL:
+            return bool(self.eval_success)
+        if self.phase_id != self.PHASE_POLICY:
+            raise RuntimeError('finish_episode() requires the POLICY handoff')
+        self.metadata['bulb_submission_source']='policy_submitted_end'
+        self._finish_bulb_episode()
+        self._save_metadata()
+        return self.eval_success
+
     def check_early_stop(self):
         return self.failure is not None or self._accepted_result is False
 
@@ -1759,9 +1790,9 @@ class Task(LegacyBulbTask):
         from ._force_task_utils import motion_ticks
         if self._accepted_result is not None:
             return
-        self._submission_requested=True
         self.metadata.setdefault('bulb_submission_source','expert_submitted_end')
         self._accepted_result=bool(self.check_success())
+        self.eval_success=self._accepted_result
         if not self._accepted_result and self.failure is None:
             self.failure='submission_outside_acceptance'
         self.metadata['bulb_accepted']=self._accepted_result
@@ -1774,7 +1805,7 @@ class Task(LegacyBulbTask):
         self._monitor_bulb=False
         if self._accepted_result:
             light_after_submission(self)
-        if self.cfg.save_frequency>0 and self.mode!='eval_test':
+        if self.cfg.save_frequency>0 and self.mode=='collect':
             from ._force_task_utils import record_terminal_observation
             record_terminal_observation(self,'success' if self._accepted_result else (self.failure or 'incomplete'))
         manager=self._robot_manager
@@ -1783,7 +1814,7 @@ class Task(LegacyBulbTask):
         qpos=float(manager.get_gripper_qpos())
         manager.set_gripper(qpos,force=True)
         review_start=self.step_count
-        if self.plan_success:
+        if self.plan_success and self.mode == 'collect':
             self.phase='terminal_review'
             if self._accepted_result:
                 # Reveal the powered bulb only after the submitted result is
@@ -1808,7 +1839,9 @@ class Task(LegacyBulbTask):
                     if self.fractured:
                         manager.set_gripper(min(qpos+.012,k*.0001+qpos),force=True)
                     self._step(is_save=True)
-        self.metadata['bulb_terminal_review_frames']=int((self.step_count-review_start)/self.cfg.video_frequency)
+        self.metadata['bulb_terminal_review_frames']=(
+            int((self.step_count-review_start)/self.cfg.video_frequency)
+            if self.cfg.video_frequency > 0 else 0)
 
     def _run_grip_probe(self):
         self.metadata['diagnostic_only']=True
@@ -1854,10 +1887,12 @@ class Task(LegacyBulbTask):
             command[-1]=float(joints[-1])+(target-float(joints[-1]))*alpha
             executed,accepted=execute_joint_target(self,arm=command,ticks=2)
             if not executed or accepted:return False
-        self.metadata.setdefault('empty_wrist_positions',[]).append(dict(
-            start_step=begin,end_step=self.step_count,joint7_target_rad=target,
-            gripper_depth_mm=self._read_bulb_depths(),
-            object_was_unconstrained=True))
+        names=getattr(manager,'_arm_joint_names',None)
+        record=dict(start_step=begin,end_step=self.step_count,wrist_target_rad=target,
+            wrist_joint_name=names[-1] if names else f'arm_joint{len(manager._arm_ids)}',
+            gripper_depth_mm=self._read_bulb_depths(),object_was_unconstrained=True)
+        if len(manager._arm_ids)==7:record['joint7_target_rad']=target
+        self.metadata.setdefault('empty_wrist_positions',[]).append(record)
         return True
 
     def _read_bulb_depths(self):
@@ -2089,9 +2124,10 @@ class Task(LegacyBulbTask):
                     stable=stable+4 if seated and omega==0. else 0
                     if stable>=int(self.params.get('policy_hold_steps',132)):
                         self.metadata['bulb_policy_hold_steps']=stable
-                        # The hold is the expert's own business; the episode is
-                        # submitted by _play_once when this returns (there is no
-                        # stationary END gesture to catch since 2026-10-09).
+                        # The expert decides END from its own controller.
+                        # The action interface does not infer END from a hold.
+                        self.finish_episode()
+                        return True
                 correction+=omega*self.cfg.sim.dt*2
                 q=t3d.quaternions.qmult(
                     t3d.quaternions.axangle2quat([0.,0.,1.],self.controller_spin_sign*correction),hold_start.q)
@@ -2174,30 +2210,16 @@ class Task(LegacyBulbTask):
         finally:
             self._expert_active=False
         if self.controller not in ('diagnostic_grip_probe','diagnostic_torque_probe','diagnostic_load_grid'):
-            self._finish_bulb_episode()
+            self.finish_episode()
 
     def _submit_review_end(self):
-        """Score a deliberately partial action at a still command.
-
-        The review scenarios want a verdict taken while the bulb is knowingly
-        incomplete.  Upstream got one by holding the public joint target still
-        until the END gesture fired; that gesture is gone (2026-10-09), so the
-        still command is walked out and the verdict is asked for directly --
-        which scores the same physical state the gesture used to.
-        """
-        from ._force_task_utils import execute_joint_target
-        manager=self._robot_manager
-        joints=manager.robot.data.joint_pos[:,manager._arm_ids][0].clone()
+        """Submit a deliberately partial action using the ordinary public END."""
         start=self.step_count
         self.phase='review_partial_submission'
         self.metadata['review_partial_submission']=dict(
             scenario=self.params.get('bulb_review_scenario'),
-            start_step=start,action='stationary public joint target; verdict asked for directly')
-        for _ in range(100):
-            executed,accepted=execute_joint_target(self,arm=joints,ticks=2)
-            if self._accepted_result is not None or not executed or accepted:
-                break
-        self._finish_bulb_episode()
+            start_step=start,action='explicit finish_episode()')
+        self.finish_episode()
         self.metadata['review_partial_submission']['verdict_step']=self.metadata.get('bulb_physical_verdict_step')
         self.metadata['review_partial_submission']['return_after_terminal_review_step']=self.step_count
 

@@ -88,6 +88,8 @@ def worker_run(args, deploy_config, task_config, task_file_name, policy_name,
         policy_module = importlib.import_module(f"policy.{policy_name}")
 
         env_cfg:'BaseTaskCfg' = task_module.TaskCfg()
+        from envs._piano_sequence import configure_piano_task
+        configure_piano_task(env_cfg,task_config)
         # Each worker gets its own save_dir under base + worker id
         worker_id = current_process().name.split('-')[-1]  # e.g., Process-1 -> '1'
         worker_save_dir = base_save_dir / worker_id

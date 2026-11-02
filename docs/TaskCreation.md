@@ -272,9 +272,116 @@ On fresh-process seeds 0, 1, and 2, complete retrieval passed in 841, 1148, and 
 
 ## Piano articulation (`play_piano`)
 
-The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The existing arm and tactile gripper pick up a tapping tool and play C4 C4 G4 G4 A4, the first five notes of *Twinkle, Twinkle, Little Star*. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces. The tool has a rounded dark teal grip, brass ferrule and cap, satin steel shaft, and ivory-coloured compliant tip. Its detailed visible surface is also its deforming FEM contact surface, with a 26 mm grip, 7.8 mm tip, and 108 mm overall length. Static box panels and piano supports are also exactly fixed so collision geometry stays aligned with the visual shells under gravity. Both key motion and fingertip reactions are simulated through UIPC contact.
+The standalone [arm and Shadow Hand task](../env/tasks/arm_shadow_piano.py)
+and the tapping-tool task both accept an ordered note prompt. Without one,
+they sample six C4–B4 notes, including black keys; an explicit seed reproduces
+the sequence. Pitch names accept sharps/flats and optional octaves (default 4).
+The hand's `--song twinkle` preset retains all 42 notes. The arm moves in X/Y/Z
+to reach both rows; the older rail and fixed-palm variants remain available.
+See [prompts, interfaces and timestep labels](../env/tasks/README.md).
 
-The robot directly picks up the tapping tool and plays the fixed phrase. There is no tactile reference, cue-matching action, or randomized articulation label. Notes alternate short-light and long-firm, starting short-light: 1.5 ± 0.45 N for 0.20 s, then 3.0 ± 0.45 N for 0.60 s. Scoring uses physical key contact loads at every 120 Hz physics tick, including wrong-key presses, overload, early release, and late release. Success also requires acquisition of the tapping tool.
+The scene is an upright piano with 88 contactable keys in the standard 52-white/36-black arrangement, a keybed, cabinet, music desk, and decorative pedals. The arm and tactile gripper pick up a tapping tool and play the requested sequence. Keys use stiff FEM bodies with compliant rear flexures and exactly pinned rear faces. The tool has a rounded dark teal grip, brass ferrule and cap, satin steel shaft, and ivory-coloured compliant tip. Its detailed visible surface is also its deforming FEM contact surface, with a 26 mm grip, 7.8 mm tip, and 108 mm overall length. Static box panels and piano supports are exactly fixed. The tool task solves key motion and fingertip reactions through UIPC contact; the hand's DIGIT backend uses PhysX contacts and the original TACTO renderer.
+
+Default success checks the requested pitch order, contact in the target force band, minimum hold and separate release. Both task configs enable dynamics judging by default. Set `piano_require_dynamics: false` for the tool or pass `--no-judge-dynamics` for the hand to disable force-band scoring while retaining the timestep labels. The tool targets 1.5 ± 0.45 N for light and 3.0 ± 0.45 N for heavy; hold duration is separate, defaulting to 0.12 s. `piano_wrong_key_policy` selects immediate failure or retry at the current note. The tool retains its overload check and acquisition requirement. Configure the prompt through `piano_notes` and related settings in `task_config/play_piano.yml` or through reset options.
+
+Both tasks record separate target and actual dynamics every physics step (0 idle, 1 light, 2 heavy), with note indices, measured force and a simulation timestamp. The tool exposes numeric observation fields under `piano`; the hand uses Gym `info["piano"]`. Recorded HDF5 frames carry aligned `piano/` fields, and JSONL traces retain every physics tick. Video annotations affect the observer view, preserving raw tactile RGB. These fields and overrides apply only to the two piano tasks.
+
+The standalone hand runner accepts `--tactile --record-actions` to record
+the observation at control time `t` together with its issued Gym action.
+`action_stop_physics_step` gives the actual end of each command; the last
+command can end before the nominal eight physics ticks when native success
+or truncation occurs. Terminal physics step/time are stored as attributes.
+Without this flag, the original post-step tactile recording remains available.
+The arm/Shadow path records 111 state values, four action values and one
+complete index-finger DIGIT RGB frame per 30 Hz control boundary.
+
+The frozen recording path subsequently passed 50 fresh native episodes
+(seeds 1000--1049, 50 successes in 50 attempts). All 36,294 RGB/action pairs
+passed full image, force-hold and timestamp validation. All 50 episodes
+were uploaded with manifest readback, including a full HDF5 download/hash
+comparison for the first episode. Mean native collection time was 94.0
+wall-clock seconds per episode. Runtime source hashes were identical
+throughout and match implementation `38c7534d284fcbc1c0a270d87a69b86ce5f56761`
+after line-ending normalization. These are scripted demonstrations.
+
+Both piano datasets can use the collection/upload queue:
+
+```bash
+python scripts/collect_tactile_memory.py --task arm_shadow_piano --count 50 --start-seed 1000 --repo-id OWNER/DATASET
+python scripts/collect_tactile_memory.py --task play_piano --count 30 --start-seed 2200 --output data/tactile_memory/play_piano/dataset-rich --path-in-repo play_piano/mini-depth-marker/episodes --repo-id OWNER/DATASET
+```
+
+These profiles request six seeded random notes with dynamics judging enabled.
+The tool retains the original HDF5 joint-observation convention; the hand
+adds the issued actions described above. The current manipulation profile
+also saves both Mini sensors' original `depth`, `marker` and `rgb_marker`
+outputs, head/wrist RGB, joint/EE state, `phase/sim_step`, requested
+`piano/target_midi`, and a scene/tactile video at 60 saved frames per second.
+Depth is the original 240x320 floating camera-distance map in millimetres.
+Each marker frame is `(2,64,2)` in pixels: reference/current, point, x/y.
+The original 9x7 Mini grid retains visibility filtering and repeat-last
+padding to 64; the recorder does not invent additional physical markers.
+
+`piano_steps/<seed>.jsonl` separately retains every physics tick's complete
+`key_forces_N[88]` in ascending MIDI 21--108 order. `target_key_index` is
+MIDI minus 21 and `measured_target_force_N` is that array entry, including
+zero when another key is touched. The existing `target_force_N` is the
+requested force setpoint, not the measured target-key force. Full vectors,
+actual-force labels and geometry diagnostics are privileged offline data.
+`commands/<seed>.jsonl` records the original SDK joint position/velocity
+command buffers before each physics step, including both fingers; it does
+not substitute observed joint states for commands. `sensor_config.json`
+contains sensor parameters, joint ordering and original calibration hashes;
+`result.json` retains source commit and runtime file hashes.
+
+The rich batch uses a separate output/cloud prefix to preserve the accepted
+RGB-only recordings. Run the rich validator with `--require-rich`; audit and
+publish this batch with `--play-piano-batch dataset-rich`. Physical note order,
+force bands, continuous holds, overload and release checks remain unchanged.
+
+The new hand recording path passed native seed 1000 on D4/F#4/A#4/G4/A4/F4
+with requested light/light/heavy/heavy/light/light dynamics. All six physical
+press/release events and continuous force holds passed. Its 658 RGB/action
+pairs end at physical step 5259; the final action starts at 5256 and lasts
+three ticks. Full RGB decoding, label alignment and complete HDF5 upload,
+download and SHA-256 comparison passed.
+
+The first tool dataset episode (seed 2000) passed D4/F#4/D4/G4/D4/C4 with
+light/heavy/light/heavy/heavy/light dynamics. Each note retained at least
+0.125 seconds in its required physical force band. Both the sequence
+validator and original episode reader passed: 881 saved observations and
+all 3,524 camera/tactile images decoded correctly with observer video
+disabled. Native collection took 486 wall-clock seconds on the L40S;
+this includes scene initialization. This earlier pilot remains separate from
+the subsequently frozen production batch.
+
+Fresh random sequences exposed contact rebound before a valid force hold:
+seed 2001 failed on its first light C4, and seed 2002 failed on repeated
+A#4 and the heavy-to-light B4 transition. The expert now limits descent to
+10 micrometres within 2 mm of contact until a sustained preload forms,
+then uses the existing force feedback. Newton velocity tolerance is
+0.001 m/s, corresponding to an approximately 8-micrometre stopping increment
+at 120 Hz, rather than the former 83 micrometres. The initialization budget
+is 600 seconds; reset settling frames and physical hold durations are unchanged.
+Both previously failed six-note instructions subsequently passed native
+replays with all twelve force holds exceeding 0.12 seconds. Their 1,238 and
+1,289 saved observations passed the original reader, including all 10,108
+camera/tactile RGB images. Temporary per-action geometry diagnostics were
+removed before production. Optical calibration, force bands, overload and
+release checks retain their original definitions.
+
+The frozen tool profile then passed 30 fresh native episodes, seeds
+2100--2129, with no failed attempts and required dynamics judging enabled.
+All 39,142 saved observations and 156,568 camera/tactile RGB images passed
+validation. All 30 episodes were uploaded with manifest readback; the first
+HDF5 also passed a full cloud download/SHA-256 comparison. Mean native
+collection time was 753.5 wall-clock seconds. Runtime source hashes stayed
+identical and match saved implementation
+`116d4b32ebc70529127596d51bf4ea15fde439fb`. The requested tool batch was
+reduced from 50 to 30 after these successes; the next interrupted attempt
+is preserved separately and is excluded from the dataset. Together with
+50 strap and 50 arm/Shadow episodes, the requested dataset contains 130
+accepted, uploaded and fully RGB-audited demonstrations.
 
 Contact onset is 0.3 N and release is below 0.1 N. This hysteresis prevents the initial contact transient from being mistaken for release; forces between these thresholds do not count toward a valid note-force hold.
 
@@ -282,11 +389,25 @@ Both head and wrist cameras show the scene without a cue mask. Policy observatio
 
 Recorded videos include a synthesized piano soundtrack and a companion WAV. All 88 physical key contacts can trigger sound, including wrong keys; the renderer does not read the intended melody or successful-note labels. Contact onset/release determines timing, the actual peak contact force controls amplitude/brightness, and the physical key index determines pitch. Physical event steps are mapped to actual recorded frames, including the policy boundary. Sound uses decaying, slightly detuned partials and a release envelope; it is an audible presentation of the contact events, not a simulation of strings or room acoustics. Audio is generated at episode finalization, so headless collection produces playable sound without requiring an audio device.
 
-The detailed-tool, five-note version passed seeds 0 and 1 consecutively in the regular collector, including reset between episodes, in 1334 and 1356 physics ticks. Means were 1345 total ticks, 1267 policy ticks, and 632.5 saved policy observations. Total recorded/video frames were 650 and 662 (mean 656) at 60 Hz. Both episodes passed raw-data validation, contained five physical note events in the correct order, and produced fully decoded H.264 videos with AAC soundtracks (48 kHz). WAV spectral peaks matched C4/C4/G4/G4/A4, with separate releases between repeated notes. These are finite scripted demonstrations, not trained-policy results.
+The earlier fixed five-note tool recording passed seeds 0 and 1 in the regular collector, including reset, in 1334 and 1356 physics ticks. Those recordings remain reference results for the original phrase. The configurable hand task passed the C#4/C4/G4/A4/E4/F4 prompt with strict dynamics (5942 ticks, 743 tactile frames), and the default random seed-0 six-note prompt (4829 ticks, 604 frames). Per-tick labels, HDF5 alignment, measured-force classes and physical audio pitches were checked. The configurable tool task passed the same six-note prompt on seed 7, with 1598 policy ticks, 821 saved frames and six matching physical audio events. The standard episode validator passed after decoding all 4926 saved RGB images; outputs are in `data/piano_sequences/tool`. The regular collector also passed seeds 8 and 9 in the same process, including reset, with strict light/heavy judging on two separately released C4 strokes: 690/680 policy ticks and 368/362 saved frames. Both episodes passed RGB-only image/schema validation and JSONL/HDF5/audio alignment checks (`data/piano_sequences/tool_repeat`). These are scripted demonstrations, not trained-policy results.
 
-Development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The final controller uses the three-sample median described above while retaining the original 0.01 m/s solver tolerance and all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
+The Isaac Sim 5.1 / Isaac Lab 2.3.2 gripper path reuses the original Mini
+factory, optical calibration, FEM pad and adaptive-grasp API. Reset synchronizes
+the gel vertices and original attachment targets with the robot pose before the
+first solve. FEM writes use UIPC's `backend_fem_vertex_offset`, because native
+storage is grouped by geometry dimension/constitution and can differ from Python
+creation order. Rendering converts UIPC world vertices into each mesh's current
+Fabric local frame after `SimulationContext.forward()` and updates local bounds.
+This avoids the extra transform that PhysX applies when refreshing a cached
+`worldMatrix`. The original gel visibility flag is retained: the optical camera
+measures contacting objects through the gel. The observer-camera adapter also
+preserves scale values while normalizing float-authored scales to Vec3d for
+Isaac Lab's pose reader. The shared wrapper's `gripper` selector calls the regular
+collector, whose app arguments are now registered before parsing.
 
-Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 240 by 240 tactile views; blind search contains only the head view and tactile views.
+Earlier development runs exposed an early release after a one-tick landing impulse and a reset timeout with a tighter global Newton tolerance. The current profile combines the three-sample median with the finer landing and solver settings above, retaining all raw scoring gates. Short-note landing transients can briefly exceed their 1.5 N holding target; neither scoring nor the sound renderer replaces these measurements with the requested target force.
+
+Both new tasks export one actual terminal observation with the physical verdict. Their `phase/policy_step` records elapsed physics ticks since handoff; the public action cadence is two physics ticks per action. Piano review frames contain two 640 by 480 camera views and two 320 by 240 tactile views; blind search contains only the head view and tactile views.
 
 Configure downstream camera lists to match each task: `blind_pick` has `head` only, plus the two tactile streams. Validate successful raw episodes with `python scripts/validate_memory_task_episode.py path/to/hdf5/0.hdf5 --expect success`. This checks cadence, terminal scoring, image decoding, camera sets, and absence of privileged labels in policy fields.
 
@@ -294,13 +415,169 @@ Configure downstream camera lists to match each task: `blind_pick` has `head` on
 bash collect_data.sh play_piano play_piano 0
 ```
 
+## ALOHA bulb tightening
+
+`bulb_tightening_aloha.yml` selects a genuine six-axis ALOHA 2 ViperX 300S
+carrier for the existing `bulb_tightening` task:
+
+```bash
+bash collect_data.sh bulb_tightening bulb_tightening_aloha 0
+```
+
+The pinned Menagerie source, original joint axes/ranges/inertias, six meshes
+and license are in `assets/embodiments/aloha`. Isaac Lab's original
+`MjcfConverter` imports the arm. The standard TacEx Mini gripper, gel pads,
+camera-relative transforms and optical calibration are retained. A visible
+35 mm mounting flange clears the Mini palm's rear geometry from the wrist;
+native self collision remains enabled. The raised home pose keeps the
+gripper clear before approach. Generated USD, URDF and Curobo files live
+under `.cache/aloha_gsmini` and rebuild when their source inputs change.
+
+Public absolute joint actions have seven values: the six named ALOHA joints
+and one gripper opening. Raw joint observations have eight values because
+both fingers are recorded. Action metadata gives the actual joint names
+and observation indices. The existing Franka profile retains its original
+eight-value control convention.
+
+The new profile retains physical probing, 1.5--3 actual formal turns,
+0.12 +/- 0.012 Nm seating torque, damage checks and at least 132 stable
+physical ticks, followed by explicit END. Its scripted demonstrator uses
+the existing diagnostic-force controller; it is not a trained RGB policy.
+
+The integrated ALOHA profile passed a complete native seed-0 episode on
+Isaac Sim 5.1 / Isaac Lab 2.3.2: 1.651 actual formal turns, 0.11739 Nm final
+torque and 174 stable physical ticks, after the controller's 180-tick hold.
+The explicit END occurred at physical step 2373. The exported 1,259 frames
+passed physical/cadence validation, and all 7,554 camera/tactile RGB images
+decoded successfully. The original 60 fps video fully decoded and matched
+the HDF5 frame count. Its 937 recorded public calls contain seven finite
+joint targets each and stop at END; ordinary atom/delay segments retain the
+existing observation recording convention. This is one validated native
+demonstration, not a measured success rate across randomized episodes.
+
 ## Motion speed and episode length
 
-`tension_strap` and `bulb_tightening` accept `task_parameters.motion_speed_scale` from 1 to 3. The code default is 1, preserving legacy timing. This parameter changes motion timing while retaining the 120 Hz physics clock, 60 Hz policy/recording cadence, force/torque acceptance thresholds, and required holds. Strap motion accelerates free gripper closure and tapers back to its original controller near contact and the force target. Bulb motion accelerates unloaded wrist return, unloaded recentering, free closure after the direction probe, and terminal opening/lift. The initial grip and reversible tactile probe retain their original timing. A separate bulb `thread_speed_scale` (1--3, default 1) accelerates free thread travel while retaining the 60 Hz command cadence and half-turn endpoint. Sensed seating load switches back to the original slow increments. The final stationary submission and physical hold durations remain unchanged. The standard bulb YAML selects motion scale 3 and thread scale 2.
+`tension_strap` and `bulb_tightening` accept `task_parameters.motion_speed_scale` from 1 to 3. The code default is 1, preserving legacy timing. This parameter changes motion timing while retaining the 120 Hz physics clock, 60 Hz policy/recording cadence, force/torque acceptance thresholds, and required holds. Strap motion accelerates free gripper closure and tapers back to its original controller near contact and the force target. Bulb motion accelerates unloaded wrist return, unloaded recentering, free closure after the direction probe, and terminal opening/lift. The initial grip and reversible tactile probe retain their original timing. A separate bulb `thread_speed_scale` (1--3, default 1) accelerates free thread travel while retaining the 60 Hz command cadence and half-turn endpoint. Sensed seating load switches back to the original slow increments. Explicit END and physical hold checks remain unchanged. The standard bulb YAML selects motion scale 3 and thread scale 2.
 
 Bulb default sampling now targets nominal 1.55--2.88 turns, leaving margin for actual seat/probe compliance; physical success requires 1.5--3 measured formal turns. Previously sampled seeds already within the new nominal range retain their geometry, including comparison seeds 0, 1 and 2. Out-of-range default samples are redrawn; explicit `nominal_turns` must be within 1.5--3. Direction and lead estimation still use tactile image responses rather than the hidden thread specification.
 
-The current hold contract is not fully parameterized: strap acceptance uses a fixed three seconds per stage and the demonstrator uses a 3.30-second estimated-force dwell. Changing YAML `hold_seconds` alone does not change either. Bulb submission requires 180 stationary physics ticks, while physical success requires at least 132 stable ticks; changing `policy_hold_steps` alone does not shorten the stationary submission gate. A shorter task variant must update controller, scorer, recording validation, and regression cases together.
+The strap supports `task_parameters.strap_color_mode: blue` (default, all three
+bands blue) or `tricolor` (left to right in strap-local X: blue, yellow, red).
+Grip tabs stay dark in both modes. This changes appearance only; geometry,
+stiffness, force targets, tactile sensing and acceptance rules stay the same.
+The selected mode is retained after rupture and saved in `strap_parameters`.
+Set it in `task_config/tension_strap.yml`, or override it for one collection run:
+
+```bash
+python scripts/collect_data.py tension_strap tension_strap --strap-color-mode blue --headless
+python scripts/collect_data.py tension_strap tension_strap --strap-color-mode tricolor --headless
+```
+
+Color regions use the mesh's local rest coordinates. The former world-space
+offset subtraction classified every band as blue after the renderer switched
+to local mesh points; intact and broken surfaces now share material bindings.
+
+The strap accepts exactly two force/time stages through
+`task_parameters.force_time_sequence: [F1_N, T1_s, F2_N, T2_s]`, or
+`--force-sequence F1_N T1_s F2_N T2_s` on `scripts/collect_data.py`.
+The instruction interval is 0 N through `overload_N` (24 N with the current
+band configuration); durations are independently chosen
+positive seconds. For example, `--force-sequence 13 1.5 17 4` requests
+13 N for 1.5 seconds followed by 17 N for 4 seconds. Descending levels are
+also accepted. The default remains `[12, 3, 18, 3]`. Each stage requires
+continuous measured physical tension within 0.5 N of its target; an excursion
+restarts that stage's hold. Zero means near-zero tension while retaining the
+grip. The unchanged overload check additionally rejects tension above 24 N.
+For a requested 24 N, the controller aims at 23.75 N, inside the intersection
+of the original tolerance and overload limit; the physical target remains 24 N.
+Both requested targets and controller references are recorded separately.
+The RGB controller uses the corresponding minimum hold duration plus 0.30
+seconds of settling margin. The original sensor, mesh, optical calibration
+and feature/prediction interfaces are retained. The old 12/18 N force
+regressor underestimates unloading tension over the expanded range. The
+new frozen `tension_strap_full_range.json` extends its force coefficients
+using separate native RGB/physical-force probes; the original regressor
+remains available. Regression inputs contain image-derived features only.
+Native image-feedback trials passed `[0, .75, 24, 1.25]`,
+`[24, 1, 0, .75]` and `[4, 1.25, 20, .75]`, with the original force,
+grip, strain, travel and rupture checks enabled.
+
+The frozen full-range profile subsequently passed 50 fresh native episodes
+(physics seeds 100--149, 50 successes in 50 attempts). The sampled forces
+covered 0--24 N in both orders, with independent requested holds from
+0.75 to 1.99 seconds. All episodes passed physical/cadence validation;
+26,295 saved observations and all 157,770 RGB images passed recording
+integrity checks. All 50 episodes were uploaded with manifest readback,
+and the first HDF5 passed a complete download/SHA-256 comparison. These
+are scripted demonstrations with unchanged physical acceptance gates,
+not learned-policy results. Exact runtime source hashes are identical
+across the batch and correspond to the saved strap implementation
+`11ae6b254d96c7110302e1d025935c9f493cea30` after line-ending normalization.
+
+The policy timeout is at least the sum of both requested holds plus 30 seconds
+(60 seconds by default); the frame/action and worker wall-time budgets grow with it. Metadata,
+instructions, per-step physical diagnostics and HDF5 validation use the same
+declared sequence. The previous `target_sequence_N` plus scalar/list
+`hold_seconds` configuration remains readable. Original v1 recordings retain
+their original default contract when validated.
+
+Validated strap datasets can be collected and uploaded from the repository
+root after installing `requirements-dataset.txt` in the upload environment,
+logging in with the official ModelScope Hub client and selecting an existing
+writable dataset:
+
+```bash
+python scripts/collect_tactile_memory.py --task tension_strap --count 50 --start-seed 100 --repo-id OWNER/DATASET
+```
+
+The native interpreter defaults to `.venv-tactile/bin/python`;
+`--native-python` and `--isaac-root` select other installed paths. The
+collector freezes source hashes, starts a fresh native scene per physics
+seed and counts successful, validated episodes. Prompt forces and hold
+times use a separate random stream from hidden material parameters.
+The collector uses one native process at a time and overlaps uploads with
+the next episode.
+
+Uploads contain the original HDF5, instruction/configuration, physical
+verdict, checksum manifest and issued-joint-command audit. The strap's
+`work/<seed>/trace.jsonl` includes privileged physical force diagnostics
+for auditing. The first accepted HDF5 is downloaded and hash-checked;
+each subsequent upload includes remote manifest readback. Completed
+episodes can be resumed with the same source hashes and output path;
+interrupted attempts are preserved for inspection.
+
+The collector restores SIGINT/SIGTERM handling for unattended jobs so an
+interruption stops the owned native process group and saves a stopped batch.
+Physical failure reasons are retained in the progress file. Failed preflight
+recordings remain separate from the requested production episodes.
+
+Audit collected recordings and publish a dataset index with:
+
+```bash
+python scripts/audit_tactile_memory.py --tasks tension_strap
+python scripts/publish_tactile_dataset.py --repo-id OWNER/DATASET --publish
+```
+
+The auditor decodes every RGB frame and checks frame counts, numeric
+finiteness and nonempty image streams. It reuses an audit only while the
+recording size, modification timestamp and audit implementation remain
+unchanged. Add `--watch` to audit alongside collection until the selected
+tasks each have 50 validated and uploaded episodes. Without `--tasks`, it
+watches the strap and both piano datasets. Use `--count` to select another
+audit minimum. The catalog reads each batch's own `target`, so a completed
+50/50/30 collection is represented with those three separate targets.
+The catalog includes only
+episodes that pass collection validation, upload readback and this image
+audit; `_checks/` upload tests do not count toward the requested totals.
+Publishing checks both remote index files against their exact local hashes,
+allowing brief branch-cache propagation after updates.
+
+Bulb policies submit through the explicit public `finish_episode()` API;
+stationary joint commands do not submit END. The scripted profile requests
+180 controller hold ticks, while physical success independently requires at
+least 132 stable ticks. Validation checks that the explicit verdict matches
+the first terminal physics step, and still accepts historical recordings
+that used the former 180-tick stationary submission interface.
 
 The standard `tension_strap.yml` profile selects scale 3. On paired seeds 0, 1, and 2, both scale 1 and scale 3 succeeded in all three episodes. Total physics ticks were 2833/2870/2911 before and 1458/1490/1594 after: the mean fell from 2871.3 to 1514 (47.3%). Mean policy ticks fell from 2807.3 to 1450, and saved policy frames from 1403 to 724. Total recorded frames are 711/727/779 (mean 739). Both force stages still require three seconds of sustained physical acceptance. Comparing recorded end-effector pose and jaw width after normalized path-length alignment gave maximum position differences of 0.186/0.066/0.083 mm and orientation differences of 0.100/0.038/0.021 degrees. This is a three-seed regression result, not a large-scale success-rate estimate.
 
@@ -324,7 +601,7 @@ python scripts/summarize_episode_steps.py data/path/to/runs
 
 The output reports attempts and successes, successful-episode means and sample counts, total physics ticks, preparation ticks, policy ticks, terminal review ticks, saved policy frames, and `saved_total_frames` counted directly from HDF5 rows. Terminal reveal movements after the bulb's physical verdict are excluded from policy timing. Saved frames are not physics ticks; changing recording frequency alone does not accelerate execution.
 
-The measurements above were collected on 2026-10-10 with Isaac Sim 4.5, Isaac Lab 2.1.1, libuipc 0.9.0, and an RTX 4090. The related regression suite passed 150 tests:
+The legacy speed comparisons and `insert_USB` baseline above were collected on 2026-10-10 with Isaac Sim 4.5, Isaac Lab 2.1.1, libuipc 0.9.0, and an RTX 4090. The newer full-range strap and piano dataset checks use Isaac Sim 5.1, Isaac Lab 2.3.2, libuipc 0.9.0, and an L40S. The regression suite for the legacy comparisons passed 150 tests:
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest \
