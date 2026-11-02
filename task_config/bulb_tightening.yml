@@ -2,7 +2,13 @@
 decimation: 1
 save_frequency: 2
 video_frequency: 2
-render_frequency: 2
+# LOCAL 2026-11-02: 2 -> 0.  The bulb's _measure() calls
+# TactileManager.get_min_depth() every step, and that call renders (the height
+# map is the tactile camera's depth buffer), so the every-2-step render here
+# was a second, redundant frame.  Serving also forces save_frequency and
+# video_frequency to 0, leaving this key as the only per-step render it
+# caused.  ViTaForge's own collection still renders through save/video.
+render_frequency: 0
 max_episode_seconds: 4000
 sensor_type: gsmini
 random_texture: false

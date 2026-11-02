@@ -1034,6 +1034,9 @@ class TactileManager:
         grid = tuple(getattr(task.cfg, "force_field_grid", (64, 48)))
         for tact in self.tactiles.values():
             tact.force_field_grid = grid
+        # LOCAL 2026-11-02: per-step cache for get_min_depth (see there).
+        self._min_depth_step = None
+        self._min_depth_value = None
 
     def update(self, dt, force_recompute=False):
         for tact in self.tactiles.values():
@@ -1057,11 +1060,25 @@ class TactileManager:
             tact.dump_force_field_meta(save_dir / f"ff_meta_{name}.npz", grid=grid)
 
     def get_min_depth(self):
+        # LOCAL 2026-11-02: one forced render per simulation step, not per
+        # call.  A depth read must render -- height_map is the tactile
+        # camera's depth buffer -- and the bulb task reads it once every step
+        # from _measure() and again at the top of every close-servo iteration.
+        # Both calls see the same simulator state, so the second one rendered
+        # the identical frame twice.  Keyed on step_count, which only a real
+        # simulator step advances, and cleared in _reset_idx (reset rewinds
+        # step_count to zero).  Callers treat the result as read-only.
+        step = getattr(self.task, 'step_count', None)
+        if step is not None and step == self._min_depth_step and self._min_depth_value is not None:
+            return self._min_depth_value
         self.task._update_render()
         depth = []
         for tact in self.tactiles.values():
             depth.append(tact.get_min_depth())
-        return torch.tensor(depth, dtype=torch.float32, device=self.task.device)
+        value = torch.tensor(depth, dtype=torch.float32, device=self.task.device)
+        self._min_depth_step = step
+        self._min_depth_value = value
+        return value
 
     def reset_reference(self):
         results = {}
@@ -1078,6 +1095,11 @@ class TactileManager:
     def _reset_idx(self):
         for tact in self.tactiles.values():
             tact._reset_idx()
+        # LOCAL 2026-11-02: drop the per-step depth cache -- step_count is
+        # rewound to zero by the same reset, so a stale value could otherwise
+        # be served for the first read of the new episode.
+        self._min_depth_step = None
+        self._min_depth_value = None
 
     def setup(self):
         for tact in self.tactiles.values():
