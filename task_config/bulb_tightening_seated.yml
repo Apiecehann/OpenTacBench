@@ -1,0 +1,90 @@
+# Four-task profile: 120 Hz physics, 60 Hz observations/actions.
+decimation: 1
+save_frequency: 2
+video_frequency: 2
+render_frequency: 2
+max_episode_seconds: 4000
+sensor_type: gsmini
+random_texture: false
+save_pre_move: true
+tactile_video_key: rgb_marker
+observations:
+  camera:
+  - rgb
+  tactile:
+  - rgb
+  - rgb_marker
+  - depth
+  - marker
+  - pose
+  embodiment:
+  - joint
+  - ee
+  actor:
+  - pose
+uniform_policy_recording: true
+reset_time_limit: 600
+save_dir: ./data
+start_seed: 0
+max_seed: 99
+episode_num: 1
+use_seed: true
+skip_pre_move: false
+task_parameters:
+  # ============================ FALSIFIED 2026-09-27 ============================
+  # DO NOT USE.  Kept only as the record of a negative result; cap-x's
+  # TASK_BACKING points back at bulb_tightening.yml.
+  #
+  # This profile cuts free travel to 0.6 mm so the bulb starts nearly seated, on
+  # the theory that the axial-shear servo only misbehaves in free travel.  The
+  # theory is wrong, and not merely suboptimal: check_success requires
+  #     formal_net_turns >= 1.  AND  phase_error_m < .002
+  # simultaneously, and expected_advance(world_yaw) = (yaw/360)*lead_m
+  # (bulb_tightening.py:614).  One full turn therefore demands 7.69 mm of REAL
+  # axial advance.  A seated bulb cannot advance -- the compliant seat hits
+  # axial_overload (seat_force_N > 180) after ~1.35 mm (k ~= 132 kN/m, from the
+  # measured 10.97 N at 83 um of compression).  So at zero free travel the two
+  # gates are jointly unsatisfiable at any rotation.
+  #
+  # The 13 mm free travel is not a defect to be engineered away -- it IS the
+  # thread's own travel: 13.000 mm / 7.6895 mm = 1.6907 turns = 608.6 deg, which
+  # is exactly where formal_net_turns comes from and why phase_error stays ~0.
+  # The env expert's documented 594 deg is that same number.  Removing the free
+  # travel removed the only phase in which both gates can hold.
+  #
+  # Measured, 2026-09-27 (seated1): the bulb reached the seat and the gate that
+  # had been unreachable did open -- seat_force_N 10.97 > 3 -- but the gel pads
+  # were at 122.2 N by 50 deg, aborting below the 135 N glass_crushed line.  The
+  # pad had already begun climbing at 30-40 deg while the bulb was still 98-250
+  # um ABOVE the seat, so that climb is not seat contact; it tracks the shear
+  # channel (793 -> 2438 -> 2670 um) which reads ~13x the geometric relative
+  # slip (EE 828 um vs bulb 633 um).  See outputs/spike_bulb_probe/FINDINGS.md.
+  # ==============================================================================
+  initial_depth_m: 0.020
+  seat_top_m: 0.0284
+  grip_depth_mm: 27.2
+  thread_friction: 0.15
+  target_torque_Nm: 0.12
+  torque_tolerance_Nm: 0.012
+  gel_modulus_mpa: 0.05
+  glass_damage_enabled: true
+  newton_max_iter: 64
+  glass_fragment_model: hollow_shell
+  glass_break_force_N: 135.0
+  over_torque_Nm: 0.15
+  policy_hold_steps: 180
+  image_feature_extractor: tracked_flow_rgb_grid
+  hold_control_deadband_Nm: 0.008
+  newton_velocity_tol_m_s: 0.001
+  friction_eps_velocity_m_s: 0.0001
+  glass_fragment_material: frosted_glass
+  glass_fragment_opacity: 1.0
+  thread_mesh_mode: source_boundary
+  efficient_wrist_motion: true
+  progressive_seating_speed: true
+  public_tactile_grasp: true
+  live_action_joint_state: true
+  preserve_thread_flank_width: true
+  probe_lead_estimator: forward_response
+  record_images_every: 1000000000
+  controller: diagnostic_force

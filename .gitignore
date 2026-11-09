@@ -37,6 +37,9 @@ __tracked_surface.stl
 /policy/ACT_Predict/**/*.ckpt
 /assets/objects/ipt/*
 /assets/objects/tmp/*
+# Thread-mesh caches written by envs/bulb_tightening.py:generate_variant();
+# keyed by the thread spec and rebuilt on demand, so they are not source.
+/assets/objects/task_assets/screw_bulb/final_v*/
 
 /assets/textures/*
 textures.zip

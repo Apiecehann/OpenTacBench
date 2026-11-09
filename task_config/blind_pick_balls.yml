@@ -1,0 +1,24 @@
+# Serving profile for the standalone touch-only ball task
+# (env/tasks/blind_pick_balls.py), read only by the blind_pick_balls branch of
+# init_task in capx/serving/launch_univtac_server.py.
+#
+# Every key here must be a field of that module's TaskCfg: the branch rejects
+# unknown keys at startup rather than letting a typo run on code defaults.
+# Physics and motion limits stay at the dataclass defaults (physics_dt 1/120,
+# action_repeat 2, travel/approach/carry speed, joint lead, tracking error) --
+# they are the profile this task was tuned against and serving has no reason
+# to move them.
+#
+# device and seed are deliberately absent: they come from the server's
+# --device and --seed, so one served process is exactly one seed's material
+# draw (see the TASK_BACKING entry).
+ball_count: 12
+material_profiles: [polished_polymer, rubber, raised_dots]
+target_class: textured
+collect_all: false
+episode_seconds: 240.
+image_shape: [480, 640]
+# Creates the observer camera.  This task's policy observation carries no
+# scene image, so the camera exists only for the server's frame capture
+# (get_frame_shot) and for /record/mode's announce.
+record_video: true

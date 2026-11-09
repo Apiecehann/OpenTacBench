@@ -22,7 +22,12 @@ def volume_mesh(points,tets):
 
 
 class UipcKeyboard:
-    stiffness=1.0  # N m / rad
+    # With 1.0 the key bottomed out at about 0.4 N: the heavy band (0.43-0.57 N)
+    # sat on the stop, where the force jumped 0.37 -> 0.62 N inside one 0.2 mm
+    # palm step, so no gel reading could identify it.  Doubling the spring puts
+    # both bands on the smooth part of the travel and moves the stop past the
+    # reachable palm range (the bands also lose half of their palm travel).
+    stiffness=2.0  # N m / rad
     damping=.025  # N m s / rad
     mass=.020     # kg per key
 

@@ -69,6 +69,25 @@ class IndexTactile:
         camera_front=(camera_points.min(0)+camera_points.max(0))/2
         # Keep the full-size camera housing outside the opaque finger mesh.
         distal_camera[:3,3]=np.array([0.,-.038,.019])-distal_camera[:3,:3]@camera_front
+        # Level the face at the press pose.  The sensor rides the distal link,
+        # so the index's flexion tilts the whole assembly by the same angle:
+        # measured at the press pose the key's top grazed the gel body's SIDE
+        # (70.14 mm) while the optical face stayed 0.37 mm clear, leaving the
+        # face, the markers and the FEM surface untouched by a 0.15-0.5 N
+        # press.  Counter-rotate case, camera and gel together about the
+        # face's centre so the face lies parallel to the key at the press.
+        # Measured after levelling: the index joint settles at .50 rad at the
+        # press pose once the face carries the key.  Levelling at the earlier
+        # pre-contact .424 left a 3.6 deg residual tilt; the contact then rode
+        # the face's rim and the force jumped 0.45 -> 0.55-0.96 N as the key
+        # turned, which is what capped every force reading.
+        press_flexion=.50  # measured index joint at the press pose
+        c,s=np.cos(press_flexion),np.sin(press_flexion)
+        level=np.eye(4)
+        level[:3,:3]=[[1,0,0],[0,c,s],[0,-s,c]]
+        centre=np.array([0.,-.038,.019])
+        level[:3,3]=centre-level[:3,:3]@centre
+        distal_camera=level@distal_camera
         distal_case=distal_camera@np.linalg.inv(np.linalg.solve(case_world,camera_world))
         distal=self.task.stage.GetPrimAtPath('/World/Hand/robot0_ffdistal')
         distal_world=np.array(UsdGeom.XformCache().GetLocalToWorldTransform(distal)).T

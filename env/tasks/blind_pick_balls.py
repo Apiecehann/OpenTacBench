@@ -44,7 +44,12 @@ class TaskCfg:
     seed: int=0
     physics_dt: float=1/120
     action_repeat: int=2
-    episode_seconds: float=240.
+    # One hour of wall clock on this rig (~0.5 s per control step, 60 control
+    # steps per simulated second) is 120 s of simulated time.  The task used
+    # to run 240 s; 2026-11-04 that was cut in half because a single episode
+    # otherwise costs 1.6-2 h of wall clock, which is not a usable evaluation
+    # unit.  This is the task's own clock: it latches failure='timeout' here.
+    episode_seconds: float=120.
     workspace: str='.cache/blind_pick_balls/world'
     image_shape: tuple=(480,640)
     robot_usd: str|None=None

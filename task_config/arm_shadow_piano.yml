@@ -1,0 +1,37 @@
+# ViTaForge: arm_shadow_piano
+# Served profile for cap-x.  The task is the standalone Gymnasium piano in
+# env/tasks/arm_shadow_piano.py: a Franka Panda carries a five-finger Shadow
+# Hand, only the index finger moves, and the hand plays a note sequence on the
+# physical 88-key piano.
+#
+# Tactile sensing is ON: the index finger carries the unscaled GelSight Mini
+# and the UIPC backend (env/tasks/_index_tactile.py) owns both the gel-key
+# contact and the key mechanics for the white keys it can reach.  That is why
+# the served note sequence is drawn from the white keys of C4-B4 only: the
+# GelSight backend refuses black-key sequences (a black key it cannot model
+# would fall back to PhysX and be scored by a different sensor).
+#
+# The note sequence is NOT set here.  capx/serving/launch_univtac_server.py
+# draws it from the server's --seed (capx/serving/piano_spec.py) and writes
+# piano_notes / piano_dynamics / piano_hold_seconds into the TaskCfg before the
+# task is built, so one server process serves exactly one seed's sequence and
+# the client renders the same draw into the prompt.  Setting those keys in this
+# file would be overwritten.
+episode_seconds: 180.0
+action_repeat: 8
+tactile: true
+tactile_sensor: gsmini
+# 320 keeps the per-call gel image and optical render cheap; the task accepts
+# 320 or 640, and the marker/height-map readings are the same physics at either
+# resolution.
+tactile_image_width: 320
+piano_require_dynamics: true
+piano_wrong_key_policy: fail
+# The scorer calls a key "down" at this rotation.  The tactile profile doubles
+# the key's return spring (env/tasks/_uipc_keyboard.py) so both force bands sit
+# on the smooth part of the travel; the same force then turns the key half as
+# far, and the scorer's own .025 (measured at the original stiffness) would
+# leave an in-band light press, ~.0235 rad at 0.35 N, reading as "not down".
+# .015 rad is ~0.23 N here -- below the light band's .28 N edge, so any
+# in-band press counts, while the release threshold (.008 rad) is unchanged.
+piano_press_angle: 0.015

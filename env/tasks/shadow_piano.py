@@ -43,6 +43,13 @@ class TaskCfg(PianoCfg):
     piano_continue_on_note_failure: bool = False
     piano_hold_seconds: object = None
     piano_seed: int | None = None
+    # Key rotation at which the scorer calls a key "down".  The scorer's own
+    # default (.025) was measured against the original return spring; a rig
+    # that stiffens the spring (the tactile profile doubles it so both force
+    # bands sit on the smooth part of the travel) turns the key half as far
+    # for the same force, and an in-band light press then reads as "not down".
+    # Set it in the served profile, not here.
+    piano_press_angle: float = .025
 
     def __post_init__(self):
         if self.tactile_sensor not in ('gsmini','digit'):
@@ -122,6 +129,7 @@ class Task(PianoTask):
     def _new_score(self):
         labels=self.piano_annotations
         return SingleKeyScore(key_sequence=tuple(m-21 for m in self.sequence.midi),
+            press_angle=self.cfg.piano_press_angle,
             note_hold_seconds=self.sequence.holds,require_dynamics=self.cfg.piano_require_dynamics,
             force_targets=tuple(labels.targets),force_tolerances=tuple(labels.tolerances),
             wrong_key_policy=self.cfg.piano_wrong_key_policy,

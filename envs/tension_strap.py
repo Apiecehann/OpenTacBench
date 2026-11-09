@@ -944,6 +944,40 @@ class Task(BaseTask):
         return bool(self._stage_scorer is not None and self._stage_scorer.success
                     and self.failure is None and self.plan_success)
 
+    def check_success_detail(self):
+        """Why the verdict came out as it did, without the measured load.
+
+        Read by the cap-x server's ``/check_success`` right after
+        ``check_success``.  It deliberately reports no tension: estimating the
+        load from the gel is the task, and the physical value would hand that
+        measurement over.  What is reported -- which stage was reached, how
+        long the current hold has lasted, and why the episode ended short
+        (either a latch or a plain early stop) -- is what the robot's own
+        commands and the strap's visible behaviour already tell it.
+        """
+        scorer = getattr(self, "_stage_scorer", None)
+        snapshot = scorer.snapshot() if scorer is not None else {}
+        failure = str(self.failure or snapshot.get("failure") or "")
+        if not failure and not self.check_success():
+            # A policy episode that simply stops before both holds leaves no
+            # latch at all: rupture, grasp loss, travel limit and the scorer's
+            # timeout are written when they happen, but an early stop writes
+            # nothing.  Report it under the string the controller path already
+            # uses, so a later attempt is told why it failed instead of only
+            # how far it got.
+            failure = "incomplete_two_stage_sequence"
+        detail = {
+            "failure": failure,
+            "stages_completed": int(snapshot.get("stage_index", 0)),
+        }
+        hold_s = snapshot.get("current_continuous_hold_seconds")
+        if hold_s is not None:
+            detail["current_hold_s"] = round(float(hold_s), 2)
+        elapsed_s = snapshot.get("policy_elapsed_seconds")
+        if elapsed_s is not None:
+            detail["elapsed_s"] = round(float(elapsed_s), 2)
+        return detail
+
     def _update_render(self):
         surface=getattr(self,'broken_strap_surface',None)
         if surface is not None:

@@ -2376,14 +2376,20 @@ class Task(LegacyBulbTask):
                  f'diagnostic controller {self.controller} is never accepted'),
                 ('net_turns',.5<=net_turns<=2.,
                  f'formal_net_turns {net_turns:.3f} outside 0.5--2 (signed: negative is the loosening way)'),
+                # The required number is this seed's thread lead, which the task
+                # withholds from the prompt on purpose ("it has to be measured
+                # rather than assumed").  This detail reaches the cross-seed
+                # trace, so it reports the shortfall without the target.
                 ('advance',advance>=travel-.002,
-                 f'formal_advance_m {advance*1000.:.2f} mm < {(travel-.002)*1000.:.2f} mm required'),
+                 f"formal_advance_m {advance*1000.:.2f} mm is short of this thread's full travel"),
                 ('phase_error',phase_error<.002,
                  f'phase_error_m {phase_error*1000.:.3f} mm >= 2.0 mm: rotation and axial descent disagree'),
                 ('center_drift',drift<.002,f'center_drift_m {drift*1000.:.3f} mm >= 2.0 mm'),
                 ('tilt',tilt<6.,f'tilt_deg {tilt:.2f} >= 6'),
+                # Same reason as ``advance``: 3 N is a scoring bar, and the
+                # seat is supposed to be read from the pads.
                 ('seat_force',seat_force>3.,
-                 f'seat_force_N {seat_force:.3f} <= 3: bulb was never pressed onto its seat')]
+                 'the bulb was never pressed onto its seat')]
             completed=bool(self.check_success())
             reasons=[f'{label}: {text}' for label,ok,text in checks if not ok]
             if completed and reasons:

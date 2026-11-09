@@ -171,3 +171,42 @@ class Task(BaseTask):
         z_threshold = 0.01
         return np.all(np.abs(block_pose.p) < np.array([xy_threshold, xy_threshold, z_threshold])) and \
             np.dot(block_pose.to_transformation_matrix()[:3, 2], np.array([0, 0, 1])) > 0.965
+
+    def check_success_detail(self):
+        """Return dict with per-check diagnostics for failure analysis.
+
+        Same placement contract as ``check_success``; the label and the target
+        plate are the oracle's answer and the trace harness filters them out --
+        callers that deliver this to a model must do the same.
+        """
+        block_pose = self.block.get_pose().rebase(self.target_pose)
+        pos_err = np.abs(block_pose.p)
+        tilt_cos = float(np.dot(
+            block_pose.to_transformation_matrix()[:3, 2], np.array([0, 0, 1])
+        ))
+        completed = bool(
+            np.all(pos_err < np.array([0.04, 0.04, 0.01])) and tilt_cos > 0.965
+        )
+        reasons = []
+        if not completed:
+            if pos_err[0] >= 0.04:
+                reasons.append(f"X off by {pos_err[0] * 100:.1f} cm (max 4 cm)")
+            if pos_err[1] >= 0.04:
+                reasons.append(f"Y off by {pos_err[1] * 100:.1f} cm (max 4 cm)")
+            if pos_err[2] >= 0.01:
+                reasons.append(f"Z off by {pos_err[2] * 100:.1f} cm (max 1 cm)")
+            if tilt_cos <= 0.965:
+                reasons.append(
+                    f"tilted {np.degrees(np.arccos(min(tilt_cos, 1.0))):.0f}° (max 15°)"
+                )
+            if not reasons:
+                reasons.append("unknown reason")
+        return {
+            "weight_label": self.choice,
+            "target_plate": self.target.cfg.name,
+            "block_pose_in_target": block_pose.tolist(),
+            "pos_error_cm": (pos_err * 100).tolist(),
+            "tilt_cos": tilt_cos,
+            "completed": completed,
+            "reasons": reasons,
+        }
